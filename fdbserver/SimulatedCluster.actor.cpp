@@ -3,7 +3,7 @@
  *
  * This source file is part of the FoundationDB open source project
  *
- * Copyright 2013-2022 Apple Inc. and the FoundationDB project authors
+ * Copyright 2013-2024 Apple Inc. and the FoundationDB project authors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -484,6 +484,7 @@ public:
 	// Refer to FDBTypes.h::TLogVersion. Defaults to the maximum supported version.
 	int maxTLogVersion = TLogVersion::MAX_SUPPORTED;
 	int extraMachineCountDC = 0;
+	int extraStorageMachineCountPerDC = 0;
 
 	Optional<bool> generateFearless, buggify;
 	Optional<std::string> config;
@@ -507,6 +508,11 @@ public:
 	bool longRunningTest = false;
 	int simulationNormalRunTestsTimeoutSeconds = 5400;
 	int simulationBuggifyRunTestsTimeoutSeconds = 36000;
+
+	// Number of tlogs in the remote region
+	Optional<int> remoteDesiredTLogCount;
+	// Number of process classes explictly set as Stateless in all DCs
+	Optional<int> statelessProcessClassesPerDC;
 
 	ConfigDBType getConfigDBType() const { return configDBType; }
 
@@ -554,6 +560,7 @@ public:
 		    .add("generateFearless", &generateFearless)
 		    .add("datacenters", &datacenters)
 		    .add("desiredTLogCount", &desiredTLogCount)
+		    .add("remoteDesiredTLogCount", &remoteDesiredTLogCount)
 		    .add("commitProxyCount", &commitProxyCount)
 		    .add("grvProxyCount", &grvProxyCount)
 		    .add("resolverCount", &resolverCount)
@@ -568,6 +575,7 @@ public:
 		    .add("coordinators", &coordinators)
 		    .add("configDB", &configDBType)
 		    .add("extraMachineCountDC", &extraMachineCountDC)
+		    .add("extraStorageMachineCountPerDC", &extraStorageMachineCountPerDC)
 		    .add("blobGranulesEnabled", &blobGranulesEnabled)
 		    .add("simHTTPServerEnabled", &simHTTPServerEnabled)
 		    .add("allowDefaultTenant", &allowDefaultTenant)
@@ -579,7 +587,8 @@ public:
 		    .add("defaultTenant", &defaultTenant)
 		    .add("longRunningTest", &longRunningTest)
 		    .add("simulationNormalRunTestsTimeoutSeconds", &simulationNormalRunTestsTimeoutSeconds)
-		    .add("simulationBuggifyRunTestsTimeoutSeconds", &simulationBuggifyRunTestsTimeoutSeconds);
+		    .add("simulationBuggifyRunTestsTimeoutSeconds", &simulationBuggifyRunTestsTimeoutSeconds)
+		    .add("statelessProcessClassesPerDC", &statelessProcessClassesPerDC);
 		try {
 			auto file = toml::parse(testFile);
 			if (file.contains("configuration") && toml::find(file, "configuration").is_table()) {
@@ -816,7 +825,7 @@ ACTOR Future<ISimulator::KillType> simulatedFDBDRebooter(Reference<IClusterConne
 			    .detail("ConnectionString", connRecord ? connRecord->getConnectionString().toString() : "")
 			    .detailf("ActualTime", "%lld", DEBUG_DETERMINISM ? 0 : time(nullptr))
 			    .detail("CommandLine", "fdbserver -r simulation")
-			    .detail("BuggifyEnabled", isBuggifyEnabled(BuggifyType::General))
+			    .detail("BuggifyEnabled", isGeneralBuggifyEnabled())
 			    .detail("Simulated", true)
 			    .trackLatest("ProgramStart");
 
@@ -849,7 +858,8 @@ ACTOR Future<ISimulator::KillType> simulatedFDBDRebooter(Reference<IClusterConne
 					                       whitelistBinPaths,
 					                       "",
 					                       {},
-					                       configDBType));
+					                       configDBType,
+					                       false));
 				}
 				if (processRunBackupAgent(processMode)) {
 					futures.push_back(runBackup(connRecord));
@@ -1591,7 +1601,8 @@ void SimulationConfig::set_config(std::string config) {
 	// The only mechanism we have for turning "single" into what single means
 	// is buildConfiguration()... :/
 	std::map<std::string, std::string> hack_map;
-	ASSERT(buildConfiguration(config, hack_map) != ConfigurationResult::NO_OPTIONS_PROVIDED);
+	const auto buildResult = buildConfiguration(config, hack_map);
+	ASSERT(buildResult != ConfigurationResult::NO_OPTIONS_PROVIDED);
 	for (auto kv : hack_map)
 		db.set(kv.first, kv.second);
 }
@@ -1646,6 +1657,9 @@ void SimulationConfig::setSpecificConfig(const TestConfig& testConfig) {
 	if (testConfig.desiredTLogCount.present()) {
 		db.desiredTLogCount = testConfig.desiredTLogCount.get();
 	}
+	if (testConfig.remoteDesiredTLogCount.present()) {
+		db.remoteDesiredTLogCount = testConfig.remoteDesiredTLogCount.get();
+	}
 	if (testConfig.commitProxyCount.present()) {
 		db.commitProxyCount = testConfig.commitProxyCount.get();
 	}
@@ -1692,6 +1706,18 @@ void SimulationConfig::setTenantMode(const TestConfig& testConfig) {
 }
 
 void SimulationConfig::setEncryptionAtRestMode(const TestConfig& testConfig) {
+	// Enable encryption siginificantly reduces chance that a storage engine other than redwood got selected
+	// We want storage servers are selected by simulation tests with roughly equal chance
+	// If encryptMode is not specified explicitly, with high probability, we disable encryption
+	if (testConfig.encryptModes.empty() &&
+	    deterministicRandom()->random01() < SERVER_KNOBS->DISABLED_ENCRYPTION_PROBABILITY_SIM) {
+		EncryptionAtRestMode encryptionMode = EncryptionAtRestMode::DISABLED;
+		TraceEvent("SimulatedClusterEncryptionMode").detail("Mode", encryptionMode.toString());
+		CODE_PROBE(true, "Enforce to disable encryption in simulation", probe::decoration::rare);
+		set_config("encryption_at_rest_mode=" + encryptionMode.toString());
+		return;
+	}
+
 	std::vector<bool> available;
 	std::vector<double> probability;
 	if (!testConfig.encryptModes.empty()) {
@@ -1741,9 +1767,14 @@ void SimulationConfig::setEncryptionAtRestMode(const TestConfig& testConfig) {
 		r -= probability[mode];
 	}
 	TraceEvent("SimulatedClusterEncryptionMode").detail("Mode", encryptionMode.toString());
-	CODE_PROBE(encryptionMode == EncryptionAtRestMode::DISABLED, "Disabled encryption in simulation");
-	CODE_PROBE(encryptionMode == EncryptionAtRestMode::CLUSTER_AWARE, "Enabled cluster-aware encryption in simulation");
-	CODE_PROBE(encryptionMode == EncryptionAtRestMode::DOMAIN_AWARE, "Enabled domain-aware encryption in simulation");
+	CODE_PROBE(
+	    encryptionMode == EncryptionAtRestMode::DISABLED, "Disabled encryption in simulation", probe::decoration::rare);
+	CODE_PROBE(encryptionMode == EncryptionAtRestMode::CLUSTER_AWARE,
+	           "Enabled cluster-aware encryption in simulation",
+	           probe::decoration::rare);
+	CODE_PROBE(encryptionMode == EncryptionAtRestMode::DOMAIN_AWARE,
+	           "Enabled domain-aware encryption in simulation",
+	           probe::decoration::rare);
 	set_config("encryption_at_rest_mode=" + encryptionMode.toString());
 }
 
@@ -1768,28 +1799,18 @@ void radixTreeStorageEngineConfig(SimulationConfig* simCfg) {
 void redwoodStorageEngineConfig(SimulationConfig* simCfg) {
 	CODE_PROBE(true, "Simulated cluster using redwood storage engine");
 	// The experimental suffix is still supported so test it randomly
-	simCfg->set_config(BUGGIFY ? "ssd-redwood-1" : "ssd-redwood-1-experimental");
+	simCfg->set_config("ssd-redwood-1");
 }
 
 void rocksdbStorageEngineConfig(SimulationConfig* simCfg) {
 	CODE_PROBE(true, "Simulated cluster using RocksDB storage engine", probe::assert::hasRocksDB);
 	simCfg->set_config("ssd-rocksdb-v1");
-	// Tests using the RocksDB engine are necessarily non-deterministic because of RocksDB
-	// background threads.
-	TraceEvent(SevWarnAlways, "RocksDBNonDeterminism")
-	    .detail("Explanation", "The RocksDB storage engine is threaded and non-deterministic");
-	noUnseed = true;
 }
 
 void shardedRocksDBStorageEngineConfig(SimulationConfig* simCfg) {
 	CODE_PROBE(true, "Simulated cluster using Sharded RocksDB storage engine", probe::assert::hasRocksDB);
 	simCfg->set_config("encryption_at_rest_mode=disabled");
 	simCfg->set_config("ssd-sharded-rocksdb");
-	// Tests using the RocksDB engine are necessarily non-deterministic because of RocksDB
-	// background threads.
-	TraceEvent(SevWarnAlways, "ShardedRocksDBNonDeterminism")
-	    .detail("Explanation", "The Sharded RocksDB storage engine is threaded and non-deterministic");
-	noUnseed = true;
 }
 
 const std::unordered_map<SimulationStorageEngine, StorageEngineConfigFunc> STORAGE_ENGINE_CONFIG_MAPPER = {
@@ -1836,14 +1857,41 @@ SimulationStorageEngine chooseSimulationStorageEngine(const TestConfig& testConf
 			ASSERT(false);
 		}
 	} else {
-		constexpr auto NUM_RETRIES = 1000;
-		for (auto _ = 0; _ < NUM_RETRIES; ++_) {
-			result = deterministicRandom()->randomChoice(SIMULATION_STORAGE_ENGINE);
-			if (!testConfig.excludedStorageEngineType(result)) {
-				reason = "RandomlyChosen"_sr;
-				break;
+		std::unordered_set<SimulationStorageEngine> storageEngineAvailable;
+		for (const auto& storageEngine : SIMULATION_STORAGE_ENGINE) {
+			storageEngineAvailable.insert(storageEngine);
+		}
+		for (const auto& storageEngineExcluded : testConfig.storageEngineExcludeTypes) {
+			storageEngineAvailable.erase(storageEngineExcluded);
+		}
+		ASSERT(storageEngineAvailable.size() > 0);
+		std::vector<SimulationStorageEngine> storageEngineCandidates;
+		for (const auto& storageEngine : storageEngineAvailable) {
+			if (storageEngine == SimulationStorageEngine::MEMORY) {
+				// Adjust the chance that Memory is selected
+				storageEngineCandidates.insert(
+				    storageEngineCandidates.end(), SERVER_KNOBS->PROBABILITY_FACTOR_MEMORY_SELECTED_SIM, storageEngine);
+			} else if (storageEngine == SimulationStorageEngine::SHARDED_ROCKSDB) {
+				// Adjust the chance that ShardedRocksDB is selected
+				storageEngineCandidates.insert(storageEngineCandidates.end(),
+				                               SERVER_KNOBS->PROBABILITY_FACTOR_SHARDED_ROCKSDB_ENGINE_SELECTED_SIM,
+				                               storageEngine);
+			} else if (storageEngine == SimulationStorageEngine::SSD) {
+				// Adjust the chance that SQLite is selected
+				storageEngineCandidates.insert(storageEngineCandidates.end(),
+				                               SERVER_KNOBS->PROBABILITY_FACTOR_SQLITE_ENGINE_SELECTED_SIM,
+				                               storageEngine);
+			} else if (storageEngine == SimulationStorageEngine::ROCKSDB) {
+				// Adjust the chance that RocksDB is selected
+				storageEngineCandidates.insert(storageEngineCandidates.end(),
+				                               SERVER_KNOBS->PROBABILITY_FACTOR_ROCKSDB_ENGINE_SELECTED_SIM,
+				                               storageEngine);
+			} else {
+				storageEngineCandidates.push_back(storageEngine);
 			}
 		}
+		reason = "RandomlyChosen"_sr;
+		result = deterministicRandom()->randomChoice(storageEngineCandidates);
 		if (result == SimulationStorageEngine::SIMULATION_STORAGE_ENGINE_INVALID_VALUE) {
 			UNREACHABLE();
 		}
@@ -1889,11 +1937,18 @@ void SimulationConfig::setReplicationType(const TestConfig& testConfig) {
 			// FIXME: log replicas must be more than storage replicas because otherwise better master exists will not
 			// recognize it needs to change dcs
 			int replication_factor = deterministicRandom()->randomInt(storage_servers, generateFearless ? 4 : 5);
-			int anti_quorum = deterministicRandom()->randomInt(
-			    0,
-			    (replication_factor / 2) +
-			        1); // The anti quorum cannot be more than half of the replication factor, or the
-			            // log system will continue to accept commits when a recovery is impossible
+			// Version vector is an experimental feature that does not support logWriteAntiQuorum
+			// feature. Disable logWriteAntiQuorum (when version vector is enabled) in simulation
+			// tests for now.
+			// @todo extend version vector to support logWriteAntiQuorum feature.
+			int anti_quorum =
+			    SERVER_KNOBS->ENABLE_VERSION_VECTOR
+			        ? 0
+			        : (deterministicRandom()->randomInt(
+			              0,
+			              (replication_factor / 2) +
+			                  1)); // The anti quorum cannot be more than half of the replication factor, or the
+			                       // log system will continue to accept commits when a recovery is impossible
 			// Go through buildConfiguration, as it sets tLogPolicy/storagePolicy.
 			set_config(format("storage_replicas:=%d log_replicas:=%d log_anti_quorum:=%d "
 			                  "replica_datacenters:=1 min_replica_datacenters:=1",
@@ -1966,6 +2021,11 @@ void SimulationConfig::setRegions(const TestConfig& testConfig) {
 			// FIXME: we cannot use one satellite replication with more than one satellite per region because
 			// canKillProcesses does not respect usable_dcs
 			int satellite_replication_type = deterministicRandom()->randomInt(0, 3);
+			if (SERVER_KNOBS->ENABLE_VERSION_VECTOR_TLOG_UNICAST && satellite_replication_type == 1) {
+				// two_satellite_fast sets antiQuorum to 2, because only one out of two satellites need reply before
+				// commit. disabling for version vector in simulation until quorum feature works with it.
+				satellite_replication_type = 2;
+			}
 			switch (satellite_replication_type) {
 			case 0: {
 				CODE_PROBE(true, "Simulated cluster using no satellite redundancy mode (>4 datacenters)");
@@ -2074,8 +2134,12 @@ void SimulationConfig::setRegions(const TestConfig& testConfig) {
 
 		if (deterministicRandom()->random01() < 0.25)
 			db.desiredLogRouterCount = deterministicRandom()->randomInt(1, 7);
-		if (deterministicRandom()->random01() < 0.25)
+
+		if (testConfig.remoteDesiredTLogCount.present()) {
+			db.remoteDesiredTLogCount = testConfig.remoteDesiredTLogCount.get();
+		} else if (deterministicRandom()->random01() < 0.25) {
 			db.remoteDesiredTLogCount = deterministicRandom()->randomInt(1, 7);
+		}
 
 		bool useNormalDCsAsSatellites =
 		    datacenters > 4 && testConfig.minimumRegions < 2 && deterministicRandom()->random01() < 0.3;
@@ -2187,7 +2251,7 @@ void SimulationConfig::setMachineCount(const TestConfig& testConfig) {
 			                             5, extraDatabaseMode == ISimulator::ExtraDatabaseMode::Disabled ? 10 : 6));
 		}
 	}
-	machine_count += datacenters * testConfig.extraMachineCountDC;
+	machine_count += datacenters * (testConfig.extraMachineCountDC + testConfig.extraStorageMachineCountPerDC);
 }
 
 // Sets the coordinator count based on the testConfig. May be overwritten later
@@ -2577,13 +2641,6 @@ void setupSimulatedSystem(std::vector<Future<Void>>* systemActors,
 		               (dc < machineCount % dataCenters); // add remainder of machines to first datacenter
 		int possible_ss = 0;
 		int dcCoordinators = coordinatorCount / dataCenters + (dc < coordinatorCount % dataCenters);
-		printf("Datacenter %d: %d/%d machines, %d/%d coordinators\n",
-		       dc,
-		       machines,
-		       machineCount,
-		       dcCoordinators,
-		       coordinatorCount);
-		ASSERT_LE(dcCoordinators, machines);
 
 		// FIXME: we hardcode some machines to specifically test storage cache and blob workers
 		// TODO: caching disabled for this merge
@@ -2598,11 +2655,30 @@ void setupSimulatedSystem(std::vector<Future<Void>>* systemActors,
 			simHTTPMachines = deterministicRandom()->randomInt(1, 4);
 			fmt::print("sim http machines = {0}\n", simHTTPMachines);
 		}
+		int extraStorageMachineCount = testConfig.extraStorageMachineCountPerDC;
 
-		int totalMachines = machines + storageCacheMachines + blobWorkerMachines + simHTTPMachines;
+		int totalMachines =
+		    machines + storageCacheMachines + blobWorkerMachines + simHTTPMachines + extraStorageMachineCount;
+
+		printf("Datacenter %d: %d/%d machines, %d/%d coordinators, %d other machines\n",
+		       dc,
+		       machines,
+		       machineCount,
+		       dcCoordinators,
+		       coordinatorCount,
+		       totalMachines - machines);
+		ASSERT_LE(dcCoordinators, machines);
+
 		int useSeedForMachine = deterministicRandom()->randomInt(0, totalMachines);
 		Standalone<StringRef> zoneId;
 		Standalone<StringRef> newZoneId;
+
+		Optional<int> desiredStatelessClasses;
+		int actualStatelessClasses = 0;
+		if (testConfig.statelessProcessClassesPerDC.present()) {
+			desiredStatelessClasses = testConfig.statelessProcessClassesPerDC.get();
+		}
+
 		for (int machine = 0; machine < totalMachines; machine++) {
 			Standalone<StringRef> machineId(deterministicRandom()->randomUniqueID().toString());
 			if (machine == 0 || machineCount - dataCenters <= 4 || assignedMachines != 4 ||
@@ -2630,12 +2706,22 @@ void setupSimulatedSystem(std::vector<Future<Void>>* systemActors,
 				}
 			}
 
+			if (desiredStatelessClasses.present() && actualStatelessClasses < desiredStatelessClasses.get()) {
+				processClass = ProcessClass(ProcessClass::StatelessClass, ProcessClass::CommandLineSource);
+				actualStatelessClasses++;
+			}
+
 			// FIXME: hack to add machines specifically to test storage cache and blob workers and http server
 			// `machines` here is the normal (non-temporary) machines that totalMachines comprises of
 			int processCount = processesPerMachine;
 			ProcessMode processMode = requiresExtraDBMachines ? BackupAgentOnly : FDBDAndBackupAgent;
 			if (machine >= machines) {
-				if (storageCacheMachines > 0 && dc == 0) {
+				if (extraStorageMachineCount > 0) {
+					processClass = ProcessClass(ProcessClass::ClassType::StorageClass,
+					                            ProcessClass::CommandLineSource); // Storage
+					extraStorageMachineCount--;
+					possible_ss++;
+				} else if (storageCacheMachines > 0 && dc == 0) {
 					processClass = ProcessClass(ProcessClass::StorageCacheClass, ProcessClass::CommandLineSource);
 					storageCacheMachines--;
 				} else if (blobWorkerMachines > 0) { // add blob workers to every DC
@@ -2719,9 +2805,21 @@ void setupSimulatedSystem(std::vector<Future<Void>>* systemActors,
 			assignedMachines++;
 		}
 
+		if (desiredStatelessClasses.present()) {
+			// If this assertion fails, that measn that there were not enough machines in the DC (primary or remote)
+			// to match desired stateless classes
+			ASSERT(actualStatelessClasses == desiredStatelessClasses.get());
+		}
+
 		if (possible_ss - simconfig.db.desiredTSSCount / simconfig.db.usableRegions <= simconfig.db.storageTeamSize) {
 			gradualMigrationPossible = false;
 		}
+
+		TraceEvent("SimulatedClusterAssignMachineToDC")
+		    .detail("DC", dc)
+		    .detail("PossibleSS", possible_ss)
+		    .detail("Machines", machines)
+		    .detail("DcCoordinators", dcCoordinators);
 	}
 
 	g_simulator->desiredCoordinators = coordinatorCount;
@@ -2829,19 +2927,21 @@ ACTOR void simulationSetupAndRun(std::string dataFolder,
 	state bool allowCreatingTenants = testConfig.allowCreatingTenants;
 
 	if (!SERVER_KNOBS->SHARD_ENCODE_LOCATION_METADATA &&
-	    // NOTE: PhysicalShardMove is required to have SHARDED_ROCKSDB storage engine working.
+	    // NOTE: PhysicalShardMove and BulkLoading are required to have SHARDED_ROCKSDB storage engine working.
 	    // Inside the TOML file, the SHARD_ENCODE_LOCATION_METADATA is overridden, however, the
 	    // override will not take effect until the test starts. Here, we do an additional check
 	    // for this special simulation test.
-	    std::string_view(testFile).find("PhysicalShardMove") == std::string_view::npos) {
-		testConfig.storageEngineExcludeTypes.insert(SimulationStorageEngine::SHARDED_ROCKSDB);
-	}
-
-	if (std::string_view(testFile).find("Encrypt") != std::string_view::npos) {
+	    (std::string_view(testFile).find("PhysicalShardMove") == std::string_view::npos &&
+	     std::string_view(testFile).find("BulkLoading") == std::string_view::npos &&
+	     std::string_view(testFile).find("ShardedRocksNondeterministicTest") == std::string_view::npos)) {
 		testConfig.storageEngineExcludeTypes.insert(SimulationStorageEngine::SHARDED_ROCKSDB);
 	}
 
 	if (std::string_view(testFile).find("BlobGranule") != std::string_view::npos) {
+		testConfig.storageEngineExcludeTypes.insert(SimulationStorageEngine::SHARDED_ROCKSDB);
+	}
+
+	if (std::string_view(testFile).find("BlobRestore") != std::string_view::npos) {
 		testConfig.storageEngineExcludeTypes.insert(SimulationStorageEngine::SHARDED_ROCKSDB);
 	}
 
@@ -2983,14 +3083,14 @@ ACTOR void simulationSetupAndRun(std::string dataFolder,
 		                                  defaultTenant,
 		                                  tenantsToCreate,
 		                                  rebooting);
-		wait(testConfig.longRunningTest ? runTestsF
-		                                : timeoutError(runTestsF,
-		                                               isBuggifyEnabled(BuggifyType::General)
-		                                                   ? testConfig.simulationBuggifyRunTestsTimeoutSeconds
-		                                                   : testConfig.simulationNormalRunTestsTimeoutSeconds));
+		wait(testConfig.longRunningTest
+		         ? runTestsF
+		         : timeoutError(runTestsF,
+		                        isGeneralBuggifyEnabled() ? testConfig.simulationBuggifyRunTestsTimeoutSeconds
+		                                                  : testConfig.simulationNormalRunTestsTimeoutSeconds));
 	} catch (Error& e) {
-		auto timeoutVal = isBuggifyEnabled(BuggifyType::General) ? testConfig.simulationBuggifyRunTestsTimeoutSeconds
-		                                                         : testConfig.simulationNormalRunTestsTimeoutSeconds;
+		auto timeoutVal = isGeneralBuggifyEnabled() ? testConfig.simulationBuggifyRunTestsTimeoutSeconds
+		                                            : testConfig.simulationNormalRunTestsTimeoutSeconds;
 		auto msg = fmt::format("Timeout after {} simulated seconds", timeoutVal);
 		ProcessEvents::trigger("Timeout"_sr, StringRef(msg), e);
 		TraceEvent(SevError, "SetupAndRunError").error(e);

@@ -3,7 +3,7 @@
  *
  * This source file is part of the FoundationDB open source project
  *
- * Copyright 2013-2022 Apple Inc. and the FoundationDB project authors
+ * Copyright 2013-2024 Apple Inc. and the FoundationDB project authors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -27,6 +27,7 @@
 #include <fstream>
 #include <iterator>
 #include <sstream>
+#include <vector>
 
 #include <stdarg.h>
 #include <stdio.h>
@@ -53,6 +54,7 @@
 #include "fdbrpc/Net2FileSystem.h"
 #include "fdbrpc/PerfMetric.h"
 #include "fdbrpc/fdbrpc.h"
+#include "fdbrpc/FlowGrpc.h"
 #include "fdbrpc/simulator.h"
 #include "fdbserver/ConflictSet.h"
 #include "fdbserver/CoordinationInterface.h"
@@ -134,7 +136,7 @@ enum {
 	OPT_METRICSPREFIX, OPT_LOGGROUP, OPT_LOCALITY, OPT_IO_TRUST_SECONDS, OPT_IO_TRUST_WARN_ONLY, OPT_FILESYSTEM, OPT_PROFILER_RSS_SIZE, OPT_KVFILE,
 	OPT_TRACE_FORMAT, OPT_WHITELIST_BINPATH, OPT_BLOB_CREDENTIAL_FILE, OPT_CONFIG_PATH, OPT_USE_TEST_CONFIG_DB, OPT_NO_CONFIG_DB, OPT_FAULT_INJECTION, OPT_PROFILER, OPT_PRINT_SIMTIME,
 	OPT_FLOW_PROCESS_NAME, OPT_FLOW_PROCESS_ENDPOINT, OPT_IP_TRUSTED_MASK, OPT_KMS_CONN_DISCOVERY_URL_FILE, OPT_KMS_CONNECTOR_TYPE, OPT_KMS_REST_ALLOW_NOT_SECURE_CONECTION, OPT_KMS_CONN_VALIDATION_TOKEN_DETAILS,
-	OPT_KMS_CONN_GET_ENCRYPTION_KEYS_ENDPOINT, OPT_KMS_CONN_GET_LATEST_ENCRYPTION_KEYS_ENDPOINT, OPT_KMS_CONN_GET_BLOB_METADATA_ENDPOINT, OPT_NEW_CLUSTER_KEY, OPT_AUTHZ_PUBLIC_KEY_FILE, OPT_USE_FUTURE_PROTOCOL_VERSION
+	OPT_KMS_CONN_GET_ENCRYPTION_KEYS_ENDPOINT, OPT_KMS_CONN_GET_LATEST_ENCRYPTION_KEYS_ENDPOINT, OPT_KMS_CONN_GET_BLOB_METADATA_ENDPOINT, OPT_NEW_CLUSTER_KEY, OPT_AUTHZ_PUBLIC_KEY_FILE, OPT_USE_FUTURE_PROTOCOL_VERSION, OPT_CONSISTENCY_CHECK_URGENT_MODE
 };
 
 CSimpleOpt::SOption g_rgOptions[] = {
@@ -239,6 +241,7 @@ CSimpleOpt::SOption g_rgOptions[] = {
 	{ OPT_KMS_CONN_GET_LATEST_ENCRYPTION_KEYS_ENDPOINT, "--kms-conn-get-latest-encryption-keys-endpoint", SO_REQ_SEP },
 	{ OPT_KMS_CONN_GET_BLOB_METADATA_ENDPOINT,   "--kms-conn-get-blob-metadata-endpoint",   SO_REQ_SEP },
 	{ OPT_USE_FUTURE_PROTOCOL_VERSION, 			 "--use-future-protocol-version",			SO_REQ_SEP },
+	{ OPT_CONSISTENCY_CHECK_URGENT_MODE, 		 "--consistency-check-urgent-mode",			SO_NONE },
 	TLS_OPTION_FLAGS,
 	SO_END_OF_OPTIONS
 };
@@ -1074,7 +1077,7 @@ struct CLIOptions {
 	std::string testServersStr;
 	std::string whitelistBinPaths;
 
-	std::vector<std::string> publicAddressStrs, listenAddressStrs;
+	std::vector<std::string> publicAddressStrs, listenAddressStrs, grpcAddressStrs;
 	NetworkAddressList publicAddresses, listenAddresses;
 
 	const char* targetKey = nullptr;
@@ -1094,6 +1097,7 @@ struct CLIOptions {
 	LocalityData localities;
 	int minTesterCount = 1;
 	bool testOnServers = false;
+	bool consistencyCheckUrgentMode = false;
 
 	TLSConfig tlsConfig = TLSConfig(TLSEndpointType::SERVER);
 	double fileIoTimeout = 0.0;
@@ -1132,6 +1136,10 @@ struct CLIOptions {
 		} catch (Error&) {
 			printHelpTeaser(name);
 			flushAndExit(FDB_EXIT_ERROR);
+		}
+
+		for (auto& s : grpcAddressStrs) {
+			fmt::printf("gRPC Endpoint: %s\n", s);
 		}
 
 		if (role == ServerRole::ConsistencyCheck || role == ServerRole::ConsistencyCheckUrgent) {
@@ -1339,7 +1347,13 @@ private:
 			case OPT_PUBLICADDR:
 				argStr = args.OptionArg();
 				boost::split(tmpStrings, argStr, [](char c) { return c == ','; });
-				publicAddressStrs.insert(publicAddressStrs.end(), tmpStrings.begin(), tmpStrings.end());
+				for (auto& addr : tmpStrings) {
+					if (addr.ends_with(":grpc")) {
+						grpcAddressStrs.push_back(addr.substr(0, addr.size() - std::string(":grpc").size()));
+					} else {
+						publicAddressStrs.push_back(addr);
+					}
+				}
 				break;
 			case OPT_LISTEN:
 				argStr = args.OptionArg();
@@ -1612,6 +1626,9 @@ private:
 			case OPT_TEST_ON_SERVERS:
 				testOnServers = true;
 				break;
+			case OPT_CONSISTENCY_CHECK_URGENT_MODE:
+				consistencyCheckUrgentMode = true;
+				break;
 			case OPT_METRICSCONNFILE:
 				metricsConnFile = args.OptionArg();
 				break;
@@ -1781,6 +1798,8 @@ private:
 			}
 			}
 		}
+
+		setThreadLocalDeterministicRandomSeed(randomSeed);
 
 		try {
 			ProfilerConfig::instance().reset(profilerConfig);
@@ -1984,9 +2003,11 @@ int main(int argc, char* argv[]) {
 		if (opts.zoneId.present())
 			printf("ZoneId set to %s, dcId to %s\n", printable(opts.zoneId).c_str(), printable(opts.dcId).c_str());
 
-		setThreadLocalDeterministicRandomSeed(opts.randomSeed);
-
-		enableBuggify(opts.buggifyEnabled, BuggifyType::General);
+		if (opts.buggifyEnabled) {
+			enableGeneralBuggify();
+		} else {
+			disableGeneralBuggify();
+		}
 		enableFaultInjection(opts.faultInjectionEnabled);
 
 		IKnobCollection::setGlobalKnobCollection(IKnobCollection::Type::SERVER,
@@ -2217,10 +2238,12 @@ int main(int argc, char* argv[]) {
 
 			auto dataFolder = opts.dataFolder.size() ? opts.dataFolder : "simfdb";
 			std::vector<std::string> directories = platform::listDirectories(dataFolder);
-			const std::set<std::string> allowedDirectories = { ".", "..", "backups", "unittests", "fdbblob" };
+			const std::set<std::string> allowedDirectories = {
+				".", "..", "backups", "unittests", "fdbblob", "bulkdump"
+			};
 
 			for (const auto& dir : directories) {
-				if (dir.size() != 32 && allowedDirectories.count(dir) == 0 && dir.find("snap") == std::string::npos) {
+				if (dir.size() != 32 && !allowedDirectories.contains(dir) && dir.find("snap") == std::string::npos) {
 
 					TraceEvent(SevError, "IncompatibleDirectoryFound")
 					    .detail("DataFolder", dataFolder)
@@ -2390,10 +2413,16 @@ int main(int argc, char* argv[]) {
 				                      opts.whitelistBinPaths,
 				                      opts.configPath,
 				                      opts.manualKnobOverrides,
-				                      opts.configDBType));
+				                      opts.configDBType,
+				                      opts.consistencyCheckUrgentMode));
 				actors.push_back(histogramReport());
 				// actors.push_back( recurring( []{}, .001 ) );  // for ASIO latency measurement
-
+#ifdef FLOW_GRPC_ENABLED
+				if (opts.grpcAddressStrs.size() > 0) {
+					auto grpcServer = GrpcServer::initInstance(NetworkAddress::parse(opts.grpcAddressStrs[0]));
+					actors.push_back(grpcServer->run());
+				}
+#endif
 				f = stopAfter(waitForAll(actors));
 				g_network->run();
 			}

@@ -3,7 +3,7 @@
  *
  * This source file is part of the FoundationDB open source project
  *
- * Copyright 2013-2022 Apple Inc. and the FoundationDB project authors
+ * Copyright 2013-2024 Apple Inc. and the FoundationDB project authors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -82,31 +82,17 @@ const Value keyServersValue(RangeResult result, const std::vector<UID>& src, con
 	std::vector<Tag> srcTag;
 	std::vector<Tag> destTag;
 
-	bool foundOldLocality = false;
 	for (const KeyValueRef& kv : result) {
 		UID uid = decodeServerTagKey(kv.key);
 		if (std::find(src.begin(), src.end(), uid) != src.end()) {
 			srcTag.push_back(decodeServerTagValue(kv.value));
-			if (srcTag.back().locality == tagLocalityUpgraded) {
-				foundOldLocality = true;
-				break;
-			}
 		}
 		if (std::find(dest.begin(), dest.end(), uid) != dest.end()) {
 			destTag.push_back(decodeServerTagValue(kv.value));
-			if (destTag.back().locality == tagLocalityUpgraded) {
-				foundOldLocality = true;
-				break;
-			}
 		}
 	}
 
-	if (foundOldLocality || src.size() != srcTag.size() || dest.size() != destTag.size()) {
-		ASSERT_WE_THINK(foundOldLocality);
-		BinaryWriter wr(IncludeVersion(ProtocolVersion::withKeyServerValue()));
-		wr << src << dest;
-		return wr.toValue();
-	}
+	ASSERT_WE_THINK(src.size() == srcTag.size() && dest.size() == destTag.size());
 
 	return keyServersValue(srcTag, destTag);
 }
@@ -605,29 +591,6 @@ const Value serverKeysValue(const UID& id) {
 	return wr.toValue();
 }
 
-void validateDataMoveIdDecode(const DataMoveType& dataMoveType,
-                              const DataMovementReason& dataMoveReason,
-                              const bool& assigned,
-                              const bool& emptyRange,
-                              const UID& dataMoveId) {
-	if (dataMoveType >= DataMoveType::NUMBER_OF_TYPES || dataMoveType < DataMoveType::LOGICAL) {
-		TraceEvent(g_network->isSimulated() ? SevError : SevWarnAlways, "DecodeDataMoveIdError")
-		    .detail("Reason", "WrongDataMoveTypeOutScope")
-		    .detail("Value", dataMoveType)
-		    .detail("DataMoveID", dataMoveId)
-		    .detail("SplitIDToDecode", dataMoveId.second());
-	}
-	if (dataMoveReason >= DataMovementReason::NUMBER_OF_REASONS || dataMoveReason < DataMovementReason::INVALID) {
-		TraceEvent(g_network->isSimulated() ? SevError : SevWarnAlways, "DecodeDataMoveIdError")
-		    .detail("Reason", "WrongDataMoveReasonOutScope")
-		    .detail("Value", dataMoveReason)
-		    .detail("DataMoveID", dataMoveId)
-		    .detail("SplitIDToDecode", dataMoveId.second());
-	}
-
-	return;
-}
-
 void decodeDataMoveId(const UID& id,
                       bool& assigned,
                       bool& emptyRange,
@@ -639,8 +602,40 @@ void decodeDataMoveId(const UID& id,
 	emptyRange = id.second() == emptyShardId;
 	if (assigned && !emptyRange && id != anonymousShardId) {
 		dataMoveType = static_cast<DataMoveType>(0xFF & id.second());
+		if (dataMoveType >= DataMoveType::NUMBER_OF_TYPES || dataMoveType < DataMoveType::LOGICAL) {
+			TraceEvent(SevWarnAlways, "DecodeDataMoveIdError")
+			    .detail("Reason", "DataMoveTypeOutScope")
+			    .detail("Value", dataMoveType)
+			    .detail("DataMoveID", id)
+			    .detail("SplitIDToDecode", id.second());
+			dataMoveType = DataMoveType::LOGICAL;
+			// When upgrade from a release 7.3.x where dataMoveType is not encoded in
+			// datamove id, the decoded dataMoveType can be out of scope.
+			// For this case, we set it to DataMoveType::LOGICAL.
+			// It is possible that the new binary decodes a wrong data move type.
+			// However, it only affects whether dest SSes use physical shard move
+			// to get the data from the source server.
+			// When SS decodes a data move type, SS checks whether its KVStore supports
+			// the data move type. If no, SS will use DataMoveType::LOGICAL by default.
+		}
 		dataMoveReason = static_cast<DataMovementReason>(0xFF & (id.second() >> 8));
-		validateDataMoveIdDecode(dataMoveType, dataMoveReason, assigned, emptyRange, id);
+		if (dataMoveReason >= DataMovementReason::NUMBER_OF_REASONS || dataMoveReason < DataMovementReason::INVALID) {
+			TraceEvent(SevWarnAlways, "DecodeDataMoveIdError")
+			    .detail("Reason", "DataMoveReasonOutScope")
+			    .detail("Value", dataMoveReason)
+			    .detail("DataMoveID", id)
+			    .detail("SplitIDToDecode", id.second());
+			dataMoveReason = DataMovementReason::INVALID;
+			// When upgrade from release-7.3 where dataMoveReason is not encoded in
+			// datamove id, the decoded reason can be out of scope.
+			// For this case, we set it to DataMovementReason::INVALID.
+			// Currently, this is only used by priority-based fetchKeys throttling.
+			// It is possible that the new binary decodes a wrong data move reason.
+			// However, it only effects the throttling decison made by the fetchKeys.
+			// If the fetchKeys throttling is enabled and it misbehaves after the upgrading
+			// from release-7.3, users can temporarily disable the feature until the old data moves
+			// have been consumed.
+		}
 	}
 }
 
@@ -822,21 +817,8 @@ Version decodeServerTagHistoryKey(KeyRef const& key) {
 Tag decodeServerTagValue(ValueRef const& value) {
 	Tag s;
 	BinaryReader reader(value, IncludeVersion());
-	if (!reader.protocolVersion().hasTagLocality()) {
-		int16_t id;
-		reader >> id;
-		if (id == invalidTagOld) {
-			s = invalidTag;
-		} else if (id == txsTagOld) {
-			s = txsTag;
-		} else {
-			ASSERT(id >= 0);
-			s.id = id;
-			s.locality = tagLocalityUpgraded;
-		}
-	} else {
-		reader >> s;
-	}
+	ASSERT_WE_THINK(reader.protocolVersion().hasTagLocality());
+	reader >> s;
 	return s;
 }
 
@@ -961,10 +943,7 @@ StorageServerInterface decodeServerListValue(ValueRef const& value) {
 	StorageServerInterface s;
 	BinaryReader reader(value, IncludeVersion());
 
-	if (!reader.protocolVersion().hasStorageInterfaceReadiness()) {
-		reader >> s;
-		return s;
-	}
+	ASSERT_WE_THINK(reader.protocolVersion().hasStorageInterfaceReadiness());
 
 	return decodeServerListValueFB(value);
 }
@@ -1214,6 +1193,83 @@ const KeyRef moveKeysLockWriteKey = "\xff/moveKeysLock/Write"_sr;
 
 const KeyRef dataDistributionModeKey = "\xff/dataDistributionMode"_sr;
 const UID dataDistributionModeLock = UID(6345, 3425);
+
+// Bulk loading keys
+const KeyRef bulkLoadModeKey = "\xff/bulkLoadMode"_sr;
+const KeyRangeRef bulkLoadKeys = KeyRangeRef("\xff/bulkLoad/"_sr, "\xff/bulkLoad0"_sr);
+const KeyRef bulkLoadPrefix = bulkLoadKeys.begin;
+
+const Value bulkLoadStateValue(const BulkLoadState& bulkLoadState) {
+	return ObjectWriter::toValue(bulkLoadState, IncludeVersion());
+}
+
+BulkLoadState decodeBulkLoadState(const ValueRef& value) {
+	BulkLoadState bulkLoadState;
+	ObjectReader reader(value.begin(), IncludeVersion());
+	reader.deserialize(bulkLoadState);
+	return bulkLoadState;
+}
+
+// Bulk dumping keys
+const KeyRef bulkDumpModeKey = "\xff/bulkDumpMode"_sr;
+const KeyRangeRef bulkDumpKeys = KeyRangeRef("\xff/bulkDump/"_sr, "\xff/bulkDump0"_sr);
+const KeyRef bulkDumpPrefix = bulkDumpKeys.begin;
+
+const Value bulkDumpStateValue(const BulkDumpState& bulkDumpState) {
+	return ObjectWriter::toValue(bulkDumpState, IncludeVersion());
+}
+
+BulkDumpState decodeBulkDumpState(const ValueRef& value) {
+	BulkDumpState bulkDumpState;
+	ObjectReader reader(value.begin(), IncludeVersion());
+	reader.deserialize(bulkDumpState);
+	return bulkDumpState;
+}
+
+// Range Lock
+const std::string rangeLockNameForBulkLoad = "BulkLoad";
+
+const KeyRangeRef rangeLockKeys = KeyRangeRef("\xff/rangeLock/"_sr, "\xff/rangeLock0"_sr);
+const KeyRef rangeLockPrefix = rangeLockKeys.begin;
+
+const Value rangeLockStateSetValue(const RangeLockStateSet& rangeLockStateSet) {
+	return ObjectWriter::toValue(rangeLockStateSet, IncludeVersion());
+}
+
+RangeLockStateSet decodeRangeLockStateSet(const ValueRef& value) {
+	RangeLockStateSet rangeLockStateSet;
+	ObjectReader reader(value.begin(), IncludeVersion());
+	reader.deserialize(rangeLockStateSet);
+	return rangeLockStateSet;
+}
+
+const KeyRangeRef rangeLockOwnerKeys = KeyRangeRef("\xff/rangeLockOwner/"_sr, "\xff/rangeLockOwner0"_sr);
+const KeyRef rangeLockOwnerPrefix = rangeLockOwnerKeys.begin;
+
+const Key rangeLockOwnerKeyFor(const RangeLockOwnerName& ownerUniqueID) {
+	BinaryWriter wr(Unversioned());
+	wr.serializeBytes(rangeLockOwnerPrefix);
+	wr.serializeBytes(StringRef(ownerUniqueID));
+	return wr.toValue();
+}
+
+const RangeLockOwnerName decodeRangeLockOwnerKey(const KeyRef& key) {
+	std::string ownerUniqueID;
+	BinaryReader rd(key.removePrefix(rangeLockOwnerPrefix), Unversioned());
+	rd >> ownerUniqueID;
+	return ownerUniqueID;
+}
+
+const Value rangeLockOwnerValue(const RangeLockOwner& rangeLockOwner) {
+	return ObjectWriter::toValue(rangeLockOwner, IncludeVersion());
+}
+
+RangeLockOwner decodeRangeLockOwner(const ValueRef& value) {
+	RangeLockOwner rangeLockOwner;
+	ObjectReader reader(value.begin(), IncludeVersion());
+	reader.deserialize(rangeLockOwner);
+	return rangeLockOwner;
+}
 
 // Keys to view and control tag throttling
 const KeyRangeRef tagThrottleKeys = KeyRangeRef("\xff\x02/throttledTags/tag/"_sr, "\xff\x02/throttledTags/tag0"_sr);

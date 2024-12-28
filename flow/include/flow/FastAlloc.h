@@ -3,7 +3,7 @@
  *
  * This source file is part of the FoundationDB open source project
  *
- * Copyright 2013-2022 Apple Inc. and the FoundationDB project authors
+ * Copyright 2013-2024 Apple Inc. and the FoundationDB project authors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -38,6 +38,10 @@
 #include <drd.h>
 #include <memcheck.h>
 bool valgrindPrecise();
+#endif
+
+#ifdef ADDRESS_SANITIZER
+#include <sanitizer/lsan_interface.h>
 #endif
 
 #include "flow/Hash3.h"
@@ -209,10 +213,17 @@ std::vector<std::pair<const uint8_t*, int>> const& getWipedAreaSet();
 } // namespace keepalive_allocator
 
 force_inline uint8_t* allocateAndMaybeKeepalive(size_t size) {
+	uint8_t* p;
 	if (keepalive_allocator::isActive()) [[unlikely]]
-		return static_cast<uint8_t*>(keepalive_allocator::allocate(size));
+		p = static_cast<uint8_t*>(keepalive_allocator::allocate(size));
 	else
-		return new uint8_t[size];
+		p = new uint8_t[size];
+
+#ifdef ADDRESS_SANITIZER
+	__lsan_ignore_object(p);
+#endif
+
+	return p;
 }
 
 force_inline void freeOrMaybeKeepalive(void* ptr) {

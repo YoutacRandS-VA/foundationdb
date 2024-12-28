@@ -3,7 +3,7 @@
  *
  * This source file is part of the FoundationDB open source project
  *
- * Copyright 2013-2022 Apple Inc. and the FoundationDB project authors
+ * Copyright 2013-2024 Apple Inc. and the FoundationDB project authors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -58,6 +58,7 @@ ACTOR static Future<Void> replaceRange_impl(class IKeyValueStore* self,
 class IKeyValueStore : public IClosable {
 public:
 	virtual KeyValueStoreType getType() const = 0;
+	virtual bool getReplaceContent() const { return false; };
 	// Returns true if the KV store supports shards, i.e., implements addRange(), removeRange(), and
 	// persistRangeMapping().
 	virtual bool shardAware() const { return false; }

@@ -3,7 +3,7 @@
  *
  * This source file is part of the FoundationDB open source project
  *
- * Copyright 2013-2022 Apple Inc. and the FoundationDB project authors
+ * Copyright 2013-2024 Apple Inc. and the FoundationDB project authors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -121,6 +121,9 @@ void FlowKnobs::initialize(Randomize randomize, IsSimulated isSimulated) {
 	init( INCOMPATIBLE_PEER_DELAY_BEFORE_LOGGING,              5.0 );
 	init( PING_LOGGING_INTERVAL,                               3.0 );
 	init( PING_SKETCH_ACCURACY,                                0.1 );
+	init( LOG_CONNECTION_ATTEMPTS_ENABLED,                   false );
+	init( CONNECTION_LOG_DIRECTORY,                             "" );
+	init( LOG_CONNECTION_INTERVAL_SECS,                          3 );
 
 	init( TLS_CERT_REFRESH_DELAY_SECONDS,                 12*60*60 );
 	init( TLS_SERVER_CONNECTION_THROTTLE_TIMEOUT,              9.0 );
@@ -206,7 +209,7 @@ void FlowKnobs::initialize(Randomize randomize, IsSimulated isSimulated) {
 	//IAsyncFile
 	init( INCREMENTAL_DELETE_TRUNCATE_AMOUNT,                  5e8 ); //500MB
 	init( INCREMENTAL_DELETE_INTERVAL,                         1.0 ); //every 1 second
-		
+
 	//Net2 and FlowTransport
 	init( MIN_COALESCE_DELAY,                                10e-6 ); if( randomize && BUGGIFY ) MIN_COALESCE_DELAY = 0;
 	init( MAX_COALESCE_DELAY,                                20e-6 ); if( randomize && BUGGIFY ) MAX_COALESCE_DELAY = 0;
@@ -240,7 +243,7 @@ void FlowKnobs::initialize(Randomize randomize, IsSimulated isSimulated) {
 	init( MAX_CLOGGING_LATENCY,                                  0 ); if( randomize && BUGGIFY ) MAX_CLOGGING_LATENCY =  0.1 * deterministicRandom()->random01();
 	init( MAX_BUGGIFIED_DELAY,                                   0 ); if( randomize && BUGGIFY ) MAX_BUGGIFIED_DELAY =  0.2 * deterministicRandom()->random01();
 	init( MAX_RUNLOOP_SLEEP_DELAY,                               0 );
-	init( SIM_CONNECT_ERROR_MODE, deterministicRandom()->randomInt(0,3) );
+	init( SIM_CONNECT_ERROR_MODE,                                0 ); if( randomize && BUGGIFY ) SIM_CONNECT_ERROR_MODE = deterministicRandom()->randomInt(0,3);
 
 	//Tracefiles
 	init( ZERO_LENGTH_FILE_PAD,                                  1 );
@@ -305,7 +308,7 @@ void FlowKnobs::initialize(Randomize randomize, IsSimulated isSimulated) {
 	init( LOAD_BALANCE_TSS_MISMATCH_TRACE_FULL,              false ); if( randomize && BUGGIFY ) LOAD_BALANCE_TSS_MISMATCH_TRACE_FULL = true; // If true, saves the full details of the mismatch in a trace event. If false, saves them in the DB and the trace event references the DB row.
 	init( TSS_LARGE_TRACE_SIZE,                              50000 );
 	init( LOAD_BALANCE_FETCH_REPLICA_TIMEOUT,                  5.0 );
-	init( ENABLE_REPLICA_CONSISTENCY_CHECK_ON_READS,         false );
+	init( ENABLE_REPLICA_CONSISTENCY_CHECK_ON_READS,         false ); if( randomize && BUGGIFY ) ENABLE_REPLICA_CONSISTENCY_CHECK_ON_READS = true;
 	init( CONSISTENCY_CHECK_REQUIRED_REPLICAS,                  -2 ); // Do consistency check based on all available storage replicas
 
 	// Health Monitor

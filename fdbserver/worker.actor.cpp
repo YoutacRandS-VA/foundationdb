@@ -3,7 +3,7 @@
  *
  * This source file is part of the FoundationDB open source project
  *
- * Copyright 2013-2022 Apple Inc. and the FoundationDB project authors
+ * Copyright 2013-2024 Apple Inc. and the FoundationDB project authors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -40,6 +40,7 @@
 #include "flow/FileIdentifier.h"
 #include "flow/IRandom.h"
 #include "flow/Knobs.h"
+#include "flow/NetworkAddress.h"
 #include "flow/ObjectSerializer.h"
 #include "flow/Platform.h"
 #include "flow/ProtocolVersion.h"
@@ -465,8 +466,10 @@ struct TLogOptions {
 	}
 
 	DiskQueueVersion getDiskQueueVersion() const {
-		if (version < TLogVersion::V3)
+		if (version < TLogVersion::V3) {
+			ASSERT(false); // no longer supported
 			return DiskQueueVersion::V0;
+		}
 		if (version < TLogVersion::V7)
 			return DiskQueueVersion::V1;
 		return DiskQueueVersion::V2;
@@ -476,15 +479,10 @@ struct TLogOptions {
 TLogFn tLogFnForOptions(TLogOptions options) {
 	switch (options.version) {
 	case TLogVersion::V2:
-		if (options.spillType == TLogSpillType::REFERENCE)
-			ASSERT(false);
-		return oldTLog_6_0::tLog;
 	case TLogVersion::V3:
 	case TLogVersion::V4:
-		if (options.spillType == TLogSpillType::VALUE)
-			return oldTLog_6_0::tLog;
-		else
-			return oldTLog_6_2::tLog;
+		ASSERT(false); // V2 to V4 are no longer supported
+
 	case TLogVersion::V5:
 	case TLogVersion::V6:
 	case TLogVersion::V7:
@@ -751,7 +749,10 @@ ACTOR Future<Void> registrationClient(
 }
 
 // Returns true if `address` is used in the db (indicated by `dbInfo`) transaction system and in the db's primary DC.
-bool addressInDbAndPrimaryDc(const NetworkAddress& address, Reference<AsyncVar<ServerDBInfo> const> dbInfo) {
+bool addressInDbAndPrimaryDc(
+    const NetworkAddress& address,
+    Reference<AsyncVar<ServerDBInfo> const> dbInfo,
+    Optional<std::vector<NetworkAddress>> storageServers = Optional<std::vector<NetworkAddress>>{}) {
 	const auto& dbi = dbInfo->get();
 
 	if (dbi.master.addresses().contains(address)) {
@@ -820,12 +821,21 @@ bool addressInDbAndPrimaryDc(const NetworkAddress& address, Reference<AsyncVar<S
 		}
 	}
 
+	if (storageServers.present() &&
+	    (std::find(storageServers.get().begin(), storageServers.get().end(), address) != storageServers.get().end())) {
+		return true;
+	}
+
 	return false;
 }
 
-bool addressesInDbAndPrimaryDc(const NetworkAddressList& addresses, Reference<AsyncVar<ServerDBInfo> const> dbInfo) {
-	return addressInDbAndPrimaryDc(addresses.address, dbInfo) ||
-	       (addresses.secondaryAddress.present() && addressInDbAndPrimaryDc(addresses.secondaryAddress.get(), dbInfo));
+bool addressesInDbAndPrimaryDc(
+    const NetworkAddressList& addresses,
+    Reference<AsyncVar<ServerDBInfo> const> dbInfo,
+    Optional<std::vector<NetworkAddress>> storageServers = Optional<std::vector<NetworkAddress>>{}) {
+	return addressInDbAndPrimaryDc(addresses.address, dbInfo, storageServers) ||
+	       (addresses.secondaryAddress.present() &&
+	        addressInDbAndPrimaryDc(addresses.secondaryAddress.get(), dbInfo, storageServers));
 }
 
 namespace {
@@ -962,7 +972,9 @@ TEST_CASE("/fdbserver/worker/addressInDbAndPrimarySatelliteDc") {
 
 } // namespace
 
-bool addressInDbAndRemoteDc(const NetworkAddress& address, Reference<AsyncVar<ServerDBInfo> const> dbInfo) {
+bool addressInDbAndRemoteDc(const NetworkAddress& address,
+                            Reference<AsyncVar<ServerDBInfo> const> dbInfo,
+                            Optional<std::vector<NetworkAddress>> storageServers) {
 	const auto& dbi = dbInfo->get();
 
 	for (const auto& logSet : dbi.logSystemConfig.tLogs) {
@@ -982,12 +994,21 @@ bool addressInDbAndRemoteDc(const NetworkAddress& address, Reference<AsyncVar<Se
 		}
 	}
 
+	if (storageServers.present() &&
+	    (std::find(storageServers.get().begin(), storageServers.get().end(), address) != storageServers.get().end())) {
+		return true;
+	}
+
 	return false;
 }
 
-bool addressesInDbAndRemoteDc(const NetworkAddressList& addresses, Reference<AsyncVar<ServerDBInfo> const> dbInfo) {
-	return addressInDbAndRemoteDc(addresses.address, dbInfo) ||
-	       (addresses.secondaryAddress.present() && addressInDbAndRemoteDc(addresses.secondaryAddress.get(), dbInfo));
+bool addressesInDbAndRemoteDc(
+    const NetworkAddressList& addresses,
+    Reference<AsyncVar<ServerDBInfo> const> dbInfo,
+    Optional<std::vector<NetworkAddress>> storageServers = Optional<std::vector<NetworkAddress>>{}) {
+	return addressInDbAndRemoteDc(addresses.address, dbInfo, storageServers) ||
+	       (addresses.secondaryAddress.present() &&
+	        addressInDbAndRemoteDc(addresses.secondaryAddress.get(), dbInfo, storageServers));
 }
 
 namespace {
@@ -1138,12 +1159,18 @@ bool isDegradedPeer(const UpdateWorkerHealthRequest& lastReq, const NetworkAddre
 	return false;
 }
 
+struct PrimaryAndRemoteAddresses {
+	std::vector<NetworkAddress> primary;
+	std::vector<NetworkAddress> remote;
+};
+
 // Check if the current worker is a transaction worker, and is experiencing degraded or disconnected peers.
 UpdateWorkerHealthRequest doPeerHealthCheck(const WorkerInterface& interf,
                                             const LocalityData& locality,
                                             Reference<AsyncVar<ServerDBInfo> const> dbInfo,
                                             const UpdateWorkerHealthRequest& lastReq,
-                                            Reference<AsyncVar<bool>> enablePrimaryTxnSystemHealthCheck) {
+                                            Reference<AsyncVar<bool>> enablePrimaryTxnSystemHealthCheck,
+                                            Optional<PrimaryAndRemoteAddresses> storageServers) {
 	const auto& allPeers = FlowTransport::transport().getAllPeers();
 
 	// Check remote log router connectivity only when remote TLogs are recruited and in use.
@@ -1153,9 +1180,15 @@ UpdateWorkerHealthRequest doPeerHealthCheck(const WorkerInterface& interf,
 
 	enum WorkerLocation { None, Primary, Satellite, Remote };
 	WorkerLocation workerLocation = None;
-	if (addressesInDbAndPrimaryDc(interf.addresses(), dbInfo)) {
+	if (addressesInDbAndPrimaryDc(interf.addresses(),
+	                              dbInfo,
+	                              storageServers.present() ? storageServers.get().primary
+	                                                       : Optional<std::vector<NetworkAddress>>{})) {
 		workerLocation = Primary;
-	} else if (addressesInDbAndRemoteDc(interf.addresses(), dbInfo)) {
+	} else if (addressesInDbAndRemoteDc(interf.addresses(),
+	                                    dbInfo,
+	                                    storageServers.present() ? storageServers.get().remote
+	                                                             : Optional<std::vector<NetworkAddress>>{})) {
 		workerLocation = Remote;
 	} else if (addressesInDbAndPrimarySatelliteDc(interf.addresses(), dbInfo)) {
 		workerLocation = Satellite;
@@ -1178,7 +1211,9 @@ UpdateWorkerHealthRequest doPeerHealthCheck(const WorkerInterface& interf,
 		double lastLoggedTime = peer->lastLoggedTime <= 0.0 ? peer->lastConnectTime : peer->lastLoggedTime;
 
 		TraceEvent(SevDebug, "PeerHealthMonitor")
+		    .suppressFor(5.0)
 		    .detail("Peer", address)
+		    .detail("PeerAddress", address)
 		    .detail("Force", enablePrimaryTxnSystemHealthCheck->get())
 		    .detail("Elapsed", now() - lastLoggedTime)
 		    .detail("Disconnected", disconnectedPeer)
@@ -1209,6 +1244,7 @@ UpdateWorkerHealthRequest doPeerHealthCheck(const WorkerInterface& interf,
 			if (disconnectedPeer || degradedPeer) {
 				TraceEvent("HealthMonitorDetectDegradedPeer")
 				    .detail("Peer", address)
+				    .detail("PeerAddress", address)
 				    .detail("Elapsed", now() - lastLoggedTime)
 				    .detail("Disconnected", disconnectedPeer)
 				    .detail("MinLatency", peer->pingLatencies.min())
@@ -1237,6 +1273,7 @@ UpdateWorkerHealthRequest doPeerHealthCheck(const WorkerInterface& interf,
 			if (disconnectedPeer || degradedPeer) {
 				TraceEvent("HealthMonitorDetectDegradedPeer")
 				    .detail("Peer", address)
+				    .detail("PeerAddress", address)
 				    .detail("Satellite", true)
 				    .detail("Elapsed", now() - lastLoggedTime)
 				    .detail("Disconnected", disconnectedPeer)
@@ -1260,6 +1297,7 @@ UpdateWorkerHealthRequest doPeerHealthCheck(const WorkerInterface& interf,
 				TraceEvent("HealthMonitorDetectDegradedPeer")
 				    .detail("WorkerLocation", workerLocation)
 				    .detail("Peer", address)
+				    .detail("PeerAddress", address)
 				    .detail("RemoteLogRouter", true)
 				    .detail("Elapsed", now() - lastLoggedTime)
 				    .detail("Disconnected", true)
@@ -1280,6 +1318,7 @@ UpdateWorkerHealthRequest doPeerHealthCheck(const WorkerInterface& interf,
 				TraceEvent("HealthMonitorDetectDegradedPeer")
 				    .detail("WorkerLocation", workerLocation)
 				    .detail("Peer", address)
+				    .detail("PeerAddress", address)
 				    .detail("ExtensiveConnectivityCheck", true)
 				    .detail("Elapsed", now() - lastLoggedTime)
 				    .detail("Disconnected", true)
@@ -1299,7 +1338,7 @@ UpdateWorkerHealthRequest doPeerHealthCheck(const WorkerInterface& interf,
 		} else if (degradedPeer) {
 			req.degradedPeers.push_back(address);
 		} else if (isDegradedPeer(lastReq, address)) {
-			TraceEvent("HealthMonitorDetectRecoveredPeer").detail("Peer", address);
+			TraceEvent("HealthMonitorDetectRecoveredPeer").detail("Peer", address).detail("PeerAddress", address);
 			req.recoveredPeers.push_back(address);
 		}
 	}
@@ -1323,7 +1362,10 @@ UpdateWorkerHealthRequest doPeerHealthCheck(const WorkerInterface& interf,
 			    (workerLocation == Primary && addressInDbAndPrimarySatelliteDc(address, dbInfo)) ||
 			    (checkRemoteLogRouterConnectivity && (workerLocation == Primary || workerLocation == Satellite) &&
 			     addressIsRemoteLogRouter(address, dbInfo))) {
-				TraceEvent("HealthMonitorDetectRecentClosedPeer").suppressFor(30).detail("Peer", address);
+				TraceEvent("HealthMonitorDetectRecentClosedPeer")
+				    .suppressFor(30)
+				    .detail("Peer", address)
+				    .detail("PeerAddress", address);
 				req.disconnectedPeers.push_back(address);
 			}
 		}
@@ -1350,6 +1392,53 @@ UpdateWorkerHealthRequest doPeerHealthCheck(const WorkerInterface& interf,
 	return req;
 }
 
+static Optional<Standalone<StringRef>> getPrimaryDCId(const ServerDBInfo& dbInfo) {
+	return dbInfo.master.locality.dcId();
+}
+
+// Makes a "best effort" to return the network addresses of primary and remote storage servers.
+// Both primary and secondary (if present) addresses are returned.
+// This actor makes a network call, and if that call fails, an empty optional is returned in addition to a
+// TraceEvent being logged. Intentionally, this actor does not implement a retry policy, but the client can
+// choose to retry by waiting on this actor again.
+ACTOR Future<Optional<PrimaryAndRemoteAddresses>> getStorageServers(Database db,
+                                                                    Reference<AsyncVar<ServerDBInfo> const> dbInfo) {
+	state Optional<PrimaryAndRemoteAddresses> ret;
+	state Transaction tr(db);
+	try {
+		tr.setOption(FDBTransactionOptions::READ_SYSTEM_KEYS);
+		tr.setOption(FDBTransactionOptions::PRIORITY_SYSTEM_IMMEDIATE);
+		tr.setOption(FDBTransactionOptions::LOCK_AWARE);
+		std::vector<std::pair<StorageServerInterface, ProcessClass>> results =
+		    wait(NativeAPI::getServerListAndProcessClasses(&tr));
+		PrimaryAndRemoteAddresses storageServers;
+		const auto primaryDCId = getPrimaryDCId(dbInfo->get());
+		for (auto& [ssi, _] : results) {
+			const bool primarySS = ssi.locality.dcId().present() && primaryDCId.present() &&
+			                       ssi.locality.dcId().get() == primaryDCId.get();
+			const bool remoteSS = ssi.locality.dcId().present() && primaryDCId.present() &&
+			                      ssi.locality.dcId().get() != primaryDCId.get();
+			if (SERVER_KNOBS->GRAY_FAILURE_ALLOW_PRIMARY_SS_TO_COMPLAIN && primarySS) {
+				storageServers.primary.push_back(ssi.address());
+				if (ssi.secondaryAddress().present()) {
+					storageServers.primary.push_back(ssi.secondaryAddress().get());
+				}
+			} else if (SERVER_KNOBS->GRAY_FAILURE_ALLOW_REMOTE_SS_TO_COMPLAIN && remoteSS) {
+				storageServers.remote.push_back(ssi.address());
+				if (ssi.secondaryAddress().present()) {
+					storageServers.remote.push_back(ssi.secondaryAddress().get());
+				}
+			}
+		}
+		ret = storageServers;
+	} catch (Error& e) {
+		if (e.code() != error_code_actor_cancelled) {
+			TraceEvent("GetStorageServersError").error(e);
+		}
+	}
+	return ret;
+}
+
 // The actor that actively monitors the health of local and peer servers, and reports anomaly to the cluster controller.
 ACTOR Future<Void> healthMonitor(Reference<AsyncVar<Optional<ClusterControllerFullInterface>> const> ccInterface,
                                  WorkerInterface interf,
@@ -1357,13 +1446,22 @@ ACTOR Future<Void> healthMonitor(Reference<AsyncVar<Optional<ClusterControllerFu
                                  Reference<AsyncVar<ServerDBInfo> const> dbInfo,
                                  Reference<AsyncVar<bool>> enablePrimaryTxnSystemHealthCheck) {
 	state UpdateWorkerHealthRequest req;
+	state Optional<Database> db;
+	if (SERVER_KNOBS->GRAY_FAILURE_ALLOW_PRIMARY_SS_TO_COMPLAIN ||
+	    SERVER_KNOBS->GRAY_FAILURE_ALLOW_REMOTE_SS_TO_COMPLAIN) {
+		db = openDBOnServer(dbInfo, TaskPriority::DefaultEndpoint, LockAware::True);
+	}
 	loop {
-		Future<Void> nextHealthCheckDelay = Never();
+		state Future<Void> nextHealthCheckDelay = Never();
 		if ((dbInfo->get().recoveryState >= RecoveryState::ACCEPTING_COMMITS ||
 		     enablePrimaryTxnSystemHealthCheck->get()) &&
 		    ccInterface->get().present()) {
 			nextHealthCheckDelay = delay(SERVER_KNOBS->WORKER_HEALTH_MONITOR_INTERVAL);
-			req = doPeerHealthCheck(interf, locality, dbInfo, req, enablePrimaryTxnSystemHealthCheck);
+			state Optional<PrimaryAndRemoteAddresses> storageServers;
+			if (db.present()) {
+				wait(store(storageServers, getStorageServers(db.get(), dbInfo)));
+			}
+			req = doPeerHealthCheck(interf, locality, dbInfo, req, enablePrimaryTxnSystemHealthCheck, storageServers);
 
 			if (!req.disconnectedPeers.empty() || !req.degradedPeers.empty() || !req.recoveredPeers.empty()) {
 				if (g_network->isSimulated()) {
@@ -1381,7 +1479,9 @@ ACTOR Future<Void> healthMonitor(Reference<AsyncVar<Optional<ClusterControllerFu
 
 				// Disconnected or degraded peers are reported to the cluster controller.
 				req.address = FlowTransport::transport().getLocalAddress();
-				ccInterface->get().get().updateWorkerHealth.send(req);
+				if (ccInterface->get().present()) {
+					ccInterface->get().get().updateWorkerHealth.send(req);
+				}
 			}
 		}
 		choose {
@@ -1399,7 +1499,7 @@ std::set<std::thread::id> profiledThreads;
 
 // Returns whether or not a given thread should be profiled
 int filter_in_thread(void* arg) {
-	return profiledThreads.count(std::this_thread::get_id()) > 0 ? 1 : 0;
+	return profiledThreads.contains(std::this_thread::get_id()) ? 1 : 0;
 }
 #endif
 
@@ -2083,7 +2183,8 @@ ACTOR Future<Void> workerServer(Reference<IClusterConnectionRecord> connRecord,
                                 ConfigBroadcastInterface configBroadcastInterface,
                                 Reference<ConfigNode> configNode,
                                 Reference<LocalConfiguration> localConfig,
-                                Reference<AsyncVar<Optional<UID>>> clusterId) {
+                                Reference<AsyncVar<Optional<UID>>> clusterId,
+                                bool consistencyCheckUrgentMode) {
 	state PromiseStream<ErrorInfo> errors;
 	state Reference<AsyncVar<Optional<DataDistributorInterface>>> ddInterf(
 	    new AsyncVar<Optional<DataDistributorInterface>>());
@@ -2182,7 +2283,12 @@ ACTOR Future<Void> workerServer(Reference<IClusterConnectionRecord> connRecord,
 	errorForwarders.add(loadedPonger(interf.debugPing.getFuture()));
 	errorForwarders.add(waitFailureServer(interf.waitFailure.getFuture()));
 	errorForwarders.add(monitorTraceLogIssues(issues));
-	errorForwarders.add(testerServerCore(interf.testerInterface, connRecord, dbInfo, locality));
+	errorForwarders.add(
+	    testerServerCore(interf.testerInterface,
+	                     connRecord,
+	                     dbInfo,
+	                     locality,
+	                     consistencyCheckUrgentMode ? "ConsistencyCheckUrgent" : Optional<std::string>()));
 	errorForwarders.add(monitorHighMemory(memoryProfileThreshold));
 
 	filesClosed.add(stopping.getFuture());
@@ -2664,7 +2770,7 @@ ACTOR Future<Void> workerServer(Reference<IClusterConnectionRecord> connRecord,
 					startRole(Role::DATA_DISTRIBUTOR, recruited.id(), interf.id());
 					DUMPTOKEN(recruited.waitFailure);
 
-					Future<Void> dataDistributorProcess = dataDistributor(recruited, dbInfo);
+					Future<Void> dataDistributorProcess = dataDistributor(recruited, dbInfo, folder);
 					errorForwarders.add(forwardError(
 					    errors,
 					    Role::DATA_DISTRIBUTOR,
@@ -2672,7 +2778,9 @@ ACTOR Future<Void> workerServer(Reference<IClusterConnectionRecord> connRecord,
 					    setWhenDoneOrError(dataDistributorProcess, ddInterf, Optional<DataDistributorInterface>())));
 					ddInterf->set(Optional<DataDistributorInterface>(recruited));
 				}
-				TraceEvent("DataDistributorReceived", req.reqId).detail("DataDistributorId", recruited.id());
+				TraceEvent("DataDistributorReceived", req.reqId)
+				    .detail("DataDistributorId", recruited.id())
+				    .detail("Folder", folder); // double check if this works with SS restore
 				req.reply.send(recruited);
 			}
 			when(InitializeRatekeeperRequest req = waitNext(interf.ratekeeper.getFuture())) {
@@ -2843,7 +2951,7 @@ ACTOR Future<Void> workerServer(Reference<IClusterConnectionRecord> connRecord,
 
 				if (ekpInterf->get().present()) {
 					recruited = ekpInterf->get().get();
-					CODE_PROBE(true, "Recruited while already a encryptKeyProxy server.");
+					CODE_PROBE(true, "Recruited while already a encryptKeyProxy server.", probe::decoration::rare);
 				} else {
 					startRole(Role::ENCRYPT_KEY_PROXY, recruited.id(), interf.id());
 					DUMPTOKEN(recruited.waitFailure);
@@ -3317,7 +3425,7 @@ ACTOR Future<Void> workerServer(Reference<IClusterConnectionRecord> connRecord,
 			}
 			when(state WorkerSnapRequest snapReq = waitNext(interf.workerSnapReq.getFuture())) {
 				std::string snapReqKey = snapReq.snapUID.toString() + snapReq.role.toString();
-				if (snapReqResultMap.count(snapReqKey)) {
+				if (snapReqResultMap.contains(snapReqKey)) {
 					CODE_PROBE(true, "Worker received a duplicate finished snapshot request", probe::decoration::rare);
 					auto result = snapReqResultMap[snapReqKey];
 					result.isError() ? snapReq.reply.sendError(result.getError()) : snapReq.reply.send(result.get());
@@ -3325,7 +3433,7 @@ ACTOR Future<Void> workerServer(Reference<IClusterConnectionRecord> connRecord,
 					    .detail("SnapUID", snapReq.snapUID.toString())
 					    .detail("Role", snapReq.role)
 					    .detail("Result", result.isError() ? result.getError().code() : success().code());
-				} else if (snapReqMap.count(snapReqKey)) {
+				} else if (snapReqMap.contains(snapReqKey)) {
 					CODE_PROBE(true, "Worker received a duplicate ongoing snapshot request", probe::decoration::rare);
 					TraceEvent("RetryOngoingWorkerSnapRequest")
 					    .detail("SnapUID", snapReq.snapUID.toString())
@@ -3640,10 +3748,10 @@ TEST_CASE("/fdbserver/worker/swversion/writeVerifyVersion") {
 		return Void();
 	}
 
-	ErrorOr<Void> f = wait(errorOr(updateNewestSoftwareVersion(swversionTestDirName,
-	                                                           ProtocolVersion::withStorageInterfaceReadiness(),
-	                                                           ProtocolVersion::withStorageInterfaceReadiness(),
-	                                                           ProtocolVersion::withTSS())));
+	wait(success(errorOr(updateNewestSoftwareVersion(swversionTestDirName,
+	                                                 ProtocolVersion::withStorageInterfaceReadiness(),
+	                                                 ProtocolVersion::withStorageInterfaceReadiness(),
+	                                                 ProtocolVersion::withTSS()))));
 
 	ErrorOr<SWVersion> swversion = wait(errorOr(
 	    testSoftwareVersionCompatibility(swversionTestDirName, ProtocolVersion::withStorageInterfaceReadiness())));
@@ -3666,10 +3774,10 @@ TEST_CASE("/fdbserver/worker/swversion/runCompatibleOlder") {
 	}
 
 	{
-		ErrorOr<Void> f = wait(errorOr(updateNewestSoftwareVersion(swversionTestDirName,
-		                                                           ProtocolVersion::withStorageInterfaceReadiness(),
-		                                                           ProtocolVersion::withStorageInterfaceReadiness(),
-		                                                           ProtocolVersion::withTSS())));
+		wait(success(errorOr(updateNewestSoftwareVersion(swversionTestDirName,
+		                                                 ProtocolVersion::withStorageInterfaceReadiness(),
+		                                                 ProtocolVersion::withStorageInterfaceReadiness(),
+		                                                 ProtocolVersion::withTSS()))));
 	}
 
 	{
@@ -3688,10 +3796,10 @@ TEST_CASE("/fdbserver/worker/swversion/runCompatibleOlder") {
 	}
 
 	{
-		ErrorOr<Void> f = wait(errorOr(updateNewestSoftwareVersion(swversionTestDirName,
-		                                                           ProtocolVersion::withTSS(),
-		                                                           ProtocolVersion::withStorageInterfaceReadiness(),
-		                                                           ProtocolVersion::withTSS())));
+		wait(success(errorOr(updateNewestSoftwareVersion(swversionTestDirName,
+		                                                 ProtocolVersion::withTSS(),
+		                                                 ProtocolVersion::withStorageInterfaceReadiness(),
+		                                                 ProtocolVersion::withTSS()))));
 	}
 
 	{
@@ -3756,10 +3864,10 @@ TEST_CASE("/fdbserver/worker/swversion/runNewer") {
 	}
 
 	{
-		ErrorOr<Void> f = wait(errorOr(updateNewestSoftwareVersion(swversionTestDirName,
-		                                                           ProtocolVersion::withTSS(),
-		                                                           ProtocolVersion::withTSS(),
-		                                                           ProtocolVersion::withCacheRole())));
+		wait(success(errorOr(updateNewestSoftwareVersion(swversionTestDirName,
+		                                                 ProtocolVersion::withTSS(),
+		                                                 ProtocolVersion::withTSS(),
+		                                                 ProtocolVersion::withCacheRole()))));
 	}
 
 	{
@@ -3774,10 +3882,10 @@ TEST_CASE("/fdbserver/worker/swversion/runNewer") {
 	}
 
 	{
-		ErrorOr<Void> f = wait(errorOr(updateNewestSoftwareVersion(swversionTestDirName,
-		                                                           ProtocolVersion::withStorageInterfaceReadiness(),
-		                                                           ProtocolVersion::withStorageInterfaceReadiness(),
-		                                                           ProtocolVersion::withTSS())));
+		wait(success(errorOr(updateNewestSoftwareVersion(swversionTestDirName,
+		                                                 ProtocolVersion::withStorageInterfaceReadiness(),
+		                                                 ProtocolVersion::withStorageInterfaceReadiness(),
+		                                                 ProtocolVersion::withTSS()))));
 	}
 
 	{
@@ -4101,7 +4209,7 @@ ACTOR Future<Void> serveProcess() {
 
 				std::vector<SerializedSample> serializedSamples;
 				for (const auto& samplePtr : samples) {
-					auto serialized = SerializedSample{ .time = samplePtr->time };
+					auto serialized = SerializedSample{ .time = samplePtr->time, .data = {} };
 					for (const auto& [waitState, pair] : samplePtr->data) {
 						if (waitState >= req.waitStateStart && waitState <= req.waitStateEnd) {
 							serialized.data[waitState] = std::string(pair.first, pair.second);
@@ -4139,7 +4247,8 @@ ACTOR Future<Void> fdbd(Reference<IClusterConnectionRecord> connRecord,
                         std::string whitelistBinPaths,
                         std::string configPath,
                         std::map<std::string, std::string> manualKnobOverrides,
-                        ConfigDBType configDBType) {
+                        ConfigDBType configDBType,
+                        bool consistencyCheckUrgentMode) {
 	state std::vector<Future<Void>> actors;
 	state Reference<ConfigNode> configNode;
 	state Reference<LocalConfiguration> localConfig;
@@ -4232,7 +4341,8 @@ ACTOR Future<Void> fdbd(Reference<IClusterConnectionRecord> connRecord,
 		                                                 configBroadcastInterface,
 		                                                 configNode,
 		                                                 localConfig,
-		                                                 clusterId),
+		                                                 clusterId,
+		                                                 consistencyCheckUrgentMode),
 		                                    "WorkerServer",
 		                                    UID(),
 		                                    &normalWorkerErrors()));

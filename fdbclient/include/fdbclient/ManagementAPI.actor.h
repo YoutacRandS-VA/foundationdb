@@ -3,7 +3,7 @@
  *
  * This source file is part of the FoundationDB open source project
  *
- * Copyright 2013-2022 Apple Inc. and the FoundationDB project authors
+ * Copyright 2013-2024 Apple Inc. and the FoundationDB project authors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -36,6 +36,7 @@ standard API and some knowledge of the contents of the system key space.
 #include <map>
 #include "fdbclient/GenericManagementAPI.actor.h"
 #include "fdbclient/NativeAPI.actor.h"
+#include "fdbclient/RangeLock.h"
 #include "fdbclient/ReadYourWrites.h"
 #include "fdbclient/DatabaseConfiguration.h"
 #include "fdbclient/MonitorLeader.h"
@@ -167,6 +168,81 @@ ACTOR Future<UID> cancelAuditStorage(Reference<IClusterConnectionRecord> cluster
                                      AuditType type,
                                      UID auditId,
                                      double timeoutSeconds);
+
+// Set bulk load mode
+// When the mode is on, DD will periodically check if there is any bulkload task to do by scaning the metadata.
+ACTOR Future<int> setBulkLoadMode(Database cx, int mode);
+
+// Get valid bulk load task state within the input range
+ACTOR Future<std::vector<BulkLoadState>> getValidBulkLoadTasksWithinRange(Database cx,
+                                                                          KeyRange rangeToRead,
+                                                                          size_t limit,
+                                                                          Optional<BulkLoadPhase> phase);
+
+// Submit a bulk load task
+ACTOR Future<Void> submitBulkLoadTask(Database cx, BulkLoadState bulkLoadTask);
+
+// Acknowledge a bulk load task if it has been completed
+ACTOR Future<Void> acknowledgeBulkLoadTask(Database cx, KeyRange range, UID taskId);
+
+// Get bulk load task for the input range and taskId
+ACTOR Future<BulkLoadState> getBulkLoadTask(Transaction* tr,
+                                            KeyRange range,
+                                            UID taskId,
+                                            std::vector<BulkLoadPhase> phases);
+
+// Set bulk dump mode. When the mode is on, DD will periodically check if there is any bulkdump task to do by scaning
+// the metadata.
+ACTOR Future<int> setBulkDumpMode(Database cx, int mode);
+
+// Get bulk dump mode value.
+ACTOR Future<int> getBulkDumpMode(Database cx);
+
+// Clear the existing bulkdump job metadata
+ACTOR Future<Void> clearBulkDumpJob(Database cx);
+
+// Submit a bulkdump job. If there is any existing job, reject the new job
+ACTOR Future<Void> submitBulkDumpJob(Database cx, BulkDumpState bulkDumpState);
+
+// Get bulkdump tasks within the input range. Each range has at most one task running on.
+ACTOR Future<std::vector<BulkDumpState>> getBulkDumpTasksWithinRange(
+    Database cx,
+    KeyRange rangeToRead,
+    Optional<size_t> limit = Optional<size_t>(),
+    Optional<BulkDumpPhase> phase = Optional<BulkDumpPhase>());
+
+// Return the existing Job ID
+ACTOR Future<Optional<UID>> existAnyBulkDumpTask(Transaction* tr);
+
+// Get total number of completed tasks within the input range
+ACTOR Future<size_t> getBulkDumpCompleteTaskCount(Database cx, KeyRange rangeToRead);
+
+// Persist a rangeLock owner to database metadata
+// A range can only be locked by a registered owner
+ACTOR Future<Void> registerRangeLockOwner(Database cx, std::string uniqueId, std::string description);
+
+// Remove an owner form the database metadata
+ACTOR Future<Void> removeRangeLockOwner(Database cx, std::string uniqueId);
+
+// Get all registered rangeLock owner
+ACTOR Future<std::vector<RangeLockOwner>> getAllRangeLockOwners(Database cx);
+
+ACTOR Future<Optional<RangeLockOwner>> getRangeLockOwner(Database cx, std::string uniqueId);
+
+// Turn off user traffic for bulk load based on range lock
+ACTOR Future<Void> turnOffUserWriteTrafficForBulkLoad(Transaction* tr, KeyRange range);
+
+// Turn on user traffic for bulk load based on range lock
+ACTOR Future<Void> turnOnUserWriteTrafficForBulkLoad(Transaction* tr, KeyRange range);
+
+// Lock a user range (the input range must be within normalKeys)
+ACTOR Future<Void> takeReadLockOnRange(Database cx, KeyRange range, std::string ownerUniqueID);
+
+// Unlock a user range (the input range must be within normalKeys)
+ACTOR Future<Void> releaseReadLockOnRange(Database cx, KeyRange range, std::string ownerUniqueID);
+
+// Get locked ranges within the input range (the input range must be within normalKeys)
+ACTOR Future<std::vector<KeyRange>> getReadLockOnRange(Database cx, KeyRange range);
 
 ACTOR Future<Void> printHealthyZone(Database cx);
 ACTOR Future<bool> clearHealthyZone(Database cx, bool printWarning = false, bool clearSSFailureZoneString = false);

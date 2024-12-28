@@ -3,7 +3,7 @@
  *
  * This source file is part of the FoundationDB open source project
  *
- * Copyright 2013-2022 Apple Inc. and the FoundationDB project authors
+ * Copyright 2013-2024 Apple Inc. and the FoundationDB project authors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -668,10 +668,11 @@ struct InitializeLogRouterRequest {
 	Reference<IReplicationPolicy> tLogPolicy;
 	int8_t locality;
 	ReplyPromise<struct TLogInterface> reply;
+	Optional<Version> recoverAt = Optional<Version>();
 
 	template <class Ar>
 	void serialize(Ar& ar) {
-		serializer(ar, recoveryCount, routerTag, startVersion, tLogLocalities, tLogPolicy, locality, reply);
+		serializer(ar, recoveryCount, routerTag, startVersion, tLogLocalities, tLogPolicy, locality, reply, recoverAt);
 	}
 };
 
@@ -1200,7 +1201,8 @@ ACTOR Future<Void> fdbd(Reference<IClusterConnectionRecord> ccr,
                         std::string whitelistBinPaths,
                         std::string configPath,
                         std::map<std::string, std::string> manualKnobOverrides,
-                        ConfigDBType configDBType);
+                        ConfigDBType configDBType,
+                        bool consistencyCheckUrgentMode);
 
 ACTOR Future<Void> clusterController(Reference<IClusterConnectionRecord> ccr,
                                      Reference<AsyncVar<Optional<ClusterControllerFullInterface>>> currentCC,
@@ -1273,10 +1275,12 @@ ACTOR Future<Void> tLog(IKeyValueStore* persistentData,
 ACTOR Future<Void> resolver(ResolverInterface resolver,
                             InitializeResolverRequest initReq,
                             Reference<AsyncVar<ServerDBInfo> const> db);
-ACTOR Future<Void> logRouter(TLogInterface interf,
-                             InitializeLogRouterRequest req,
-                             Reference<AsyncVar<ServerDBInfo> const> db);
-Future<Void> dataDistributor(DataDistributorInterface ddi, Reference<AsyncVar<ServerDBInfo> const> db);
+Future<Void> logRouter(TLogInterface interf,
+                       InitializeLogRouterRequest req,
+                       Reference<AsyncVar<ServerDBInfo> const> db);
+Future<Void> dataDistributor(DataDistributorInterface ddi,
+                             Reference<AsyncVar<ServerDBInfo> const> db,
+                             std::string folder);
 ACTOR Future<Void> ratekeeper(RatekeeperInterface rki, Reference<AsyncVar<ServerDBInfo> const> db);
 ACTOR Future<Void> consistencyScan(ConsistencyScanInterface csInterf, Reference<AsyncVar<ServerDBInfo> const> dbInfo);
 ACTOR Future<Void> blobManager(BlobManagerInterface bmi, Reference<AsyncVar<ServerDBInfo> const> db, int64_t epoch);
@@ -1295,50 +1299,12 @@ void registerThreadForProfiling();
 bool addressInDbAndPrimarySatelliteDc(const NetworkAddress& address, Reference<AsyncVar<ServerDBInfo> const> dbInfo);
 
 // Returns true if `address` is used in the db (indicated by `dbInfo`) transaction system and in the db's remote DC.
-bool addressInDbAndRemoteDc(const NetworkAddress& address, Reference<AsyncVar<ServerDBInfo> const> dbInfo);
+bool addressInDbAndRemoteDc(
+    const NetworkAddress& address,
+    Reference<AsyncVar<ServerDBInfo> const> dbInfo,
+    Optional<std::vector<NetworkAddress>> storageServers = Optional<std::vector<NetworkAddress>>{});
 
 void updateCpuProfiler(ProfilerRequest req);
-
-namespace oldTLog_4_6 {
-ACTOR Future<Void> tLog(IKeyValueStore* persistentData,
-                        IDiskQueue* persistentQueue,
-                        Reference<AsyncVar<ServerDBInfo> const> db,
-                        LocalityData locality,
-                        UID tlogId,
-                        UID workerID);
-}
-namespace oldTLog_6_0 {
-ACTOR Future<Void> tLog(IKeyValueStore* persistentData,
-                        IDiskQueue* persistentQueue,
-                        Reference<AsyncVar<ServerDBInfo> const> db,
-                        LocalityData locality,
-                        PromiseStream<InitializeTLogRequest> tlogRequests,
-                        UID tlogId,
-                        UID workerID,
-                        bool restoreFromDisk,
-                        Promise<Void> oldLog,
-                        Promise<Void> recovered,
-                        std::string folder,
-                        Reference<AsyncVar<bool>> degraded,
-                        Reference<AsyncVar<UID>> activeSharedTLog,
-                        Reference<AsyncVar<bool>> enablePrimaryTxnSystemHealthCheck);
-}
-namespace oldTLog_6_2 {
-ACTOR Future<Void> tLog(IKeyValueStore* persistentData,
-                        IDiskQueue* persistentQueue,
-                        Reference<AsyncVar<ServerDBInfo> const> db,
-                        LocalityData locality,
-                        PromiseStream<InitializeTLogRequest> tlogRequests,
-                        UID tlogId,
-                        UID workerID,
-                        bool restoreFromDisk,
-                        Promise<Void> oldLog,
-                        Promise<Void> recovered,
-                        std::string folder,
-                        Reference<AsyncVar<bool>> degraded,
-                        Reference<AsyncVar<UID>> activeSharedTLog,
-                        Reference<AsyncVar<bool>> enablePrimaryTxnSystemHealthCheck);
-}
 
 typedef decltype(&tLog) TLogFn;
 

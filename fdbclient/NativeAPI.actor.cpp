@@ -3,7 +3,7 @@
  *
  * This source file is part of the FoundationDB open source project
  *
- * Copyright 2013-2022 Apple Inc. and the FoundationDB project authors
+ * Copyright 2013-2024 Apple Inc. and the FoundationDB project authors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -1559,6 +1559,7 @@ DatabaseContext::DatabaseContext(Reference<AsyncVar<Reference<IClusterConnection
     transactionsFutureVersions("FutureVersions", cc), transactionsNotCommitted("NotCommitted", cc),
     transactionsMaybeCommitted("MaybeCommitted", cc), transactionsResourceConstrained("ResourceConstrained", cc),
     transactionsProcessBehind("ProcessBehind", cc), transactionsThrottled("Throttled", cc),
+    transactionsLockRejected("LockRejected", cc),
     transactionsExpensiveClearCostEstCount("ExpensiveClearCostEstCount", cc),
     transactionGrvFullBatches("NumGrvFullBatches", cc), transactionGrvTimedOutBatches("NumGrvTimedOutBatches", cc),
     transactionCommitVersionNotFoundForSS("CommitVersionNotFoundForSS", cc), anyBGReads(false),
@@ -1872,6 +1873,7 @@ DatabaseContext::DatabaseContext(const Error& err)
     transactionsFutureVersions("FutureVersions", cc), transactionsNotCommitted("NotCommitted", cc),
     transactionsMaybeCommitted("MaybeCommitted", cc), transactionsResourceConstrained("ResourceConstrained", cc),
     transactionsProcessBehind("ProcessBehind", cc), transactionsThrottled("Throttled", cc),
+    transactionsLockRejected("LockRejected", cc),
     transactionsExpensiveClearCostEstCount("ExpensiveClearCostEstCount", cc),
     transactionGrvFullBatches("NumGrvFullBatches", cc), transactionGrvTimedOutBatches("NumGrvTimedOutBatches", cc),
     transactionCommitVersionNotFoundForSS("CommitVersionNotFoundForSS", cc), anyBGReads(false),
@@ -2119,6 +2121,7 @@ void DatabaseContext::setOption(FDBDatabaseOptions::Option option, Optional<Stri
 	if (defaultFor >= 0) {
 		ASSERT(FDBTransactionOptions::optionInfo.find((FDBTransactionOptions::Option)defaultFor) !=
 		       FDBTransactionOptions::optionInfo.end());
+		TraceEvent(SevDebug, "DatabaseContextSetPersistentOption").detail("Option", option).detail("Value", value);
 		transactionDefaults.addOption((FDBTransactionOptions::Option)defaultFor, value.castTo<Standalone<StringRef>>());
 	} else {
 		switch (option) {
@@ -2579,19 +2582,19 @@ void setNetworkOption(FDBNetworkOptions::Option option, Optional<StringRef> valu
 		tlsConfig.setDisablePlainTextConnection(true);
 		break;
 	case FDBNetworkOptions::CLIENT_BUGGIFY_ENABLE:
-		enableBuggify(true, BuggifyType::Client);
+		enableClientBuggify();
 		break;
 	case FDBNetworkOptions::CLIENT_BUGGIFY_DISABLE:
-		enableBuggify(false, BuggifyType::Client);
+		disableClientBuggify();
 		break;
 	case FDBNetworkOptions::CLIENT_BUGGIFY_SECTION_ACTIVATED_PROBABILITY:
 		validateOptionValuePresent(value);
-		clearBuggifySections(BuggifyType::Client);
-		P_BUGGIFIED_SECTION_ACTIVATED[int(BuggifyType::Client)] = double(extractIntOption(value, 0, 100)) / 100.0;
+		clearClientBuggifySections();
+		P_CLIENT_BUGGIFIED_SECTION_ACTIVATED = double(extractIntOption(value, 0, 100)) / 100.0;
 		break;
 	case FDBNetworkOptions::CLIENT_BUGGIFY_SECTION_FIRED_PROBABILITY:
 		validateOptionValuePresent(value);
-		P_BUGGIFIED_SECTION_FIRES[int(BuggifyType::Client)] = double(extractIntOption(value, 0, 100)) / 100.0;
+		P_CLIENT_BUGGIFIED_SECTION_FIRES = double(extractIntOption(value, 0, 100)) / 100.0;
 		break;
 	case FDBNetworkOptions::DISABLE_CLIENT_STATISTICS_LOGGING:
 		validateOptionValueNotPresent(value);
@@ -5058,7 +5061,7 @@ static Future<Void> tssStreamComparison(Request request,
 				mismatchEvent.detail("TSSID", tssData.tssId);
 
 				if (tssData.metrics->shouldRecordDetailedMismatch()) {
-					TSS_traceMismatch(mismatchEvent, request, ssReply.get(), tssReply.get());
+					TSS_traceMismatch(mismatchEvent, request, ssReply.get(), tssReply.get(), TSS_COMPARISON);
 
 					CODE_PROBE(FLOW_KNOBS->LOAD_BALANCE_TSS_MISMATCH_TRACE_FULL,
 					           "Tracing Full TSS Mismatch in stream comparison",
@@ -6175,7 +6178,8 @@ double Transaction::getBackoff(int errCode) {
 	// Set backoff for next time
 	if (errCode == error_code_commit_proxy_memory_limit_exceeded ||
 	    errCode == error_code_grv_proxy_memory_limit_exceeded ||
-	    errCode == error_code_transaction_throttled_hot_shard) {
+	    errCode == error_code_transaction_throttled_hot_shard ||
+	    errCode == error_code_transaction_rejected_range_locked) {
 
 		backoff = std::min(backoff * CLIENT_KNOBS->BACKOFF_GROWTH_RATE, CLIENT_KNOBS->RESOURCE_CONSTRAINED_MAX_BACKOFF);
 	} else {
@@ -6851,7 +6855,8 @@ ACTOR static Future<Void> tryCommit(Reference<TransactionState> trState, CommitT
 			    e.code() != error_code_process_behind && e.code() != error_code_future_version &&
 			    e.code() != error_code_tenant_not_found && e.code() != error_code_illegal_tenant_access &&
 			    e.code() != error_code_proxy_tag_throttled && e.code() != error_code_storage_quota_exceeded &&
-			    e.code() != error_code_tenant_locked && e.code() != error_code_transaction_throttled_hot_shard) {
+			    e.code() != error_code_tenant_locked && e.code() != error_code_transaction_throttled_hot_shard &&
+			    e.code() != error_code_transaction_rejected_range_locked) {
 				TraceEvent(SevError, "TryCommitError").error(e);
 			}
 			if (trState->trLogInfo)
@@ -6969,7 +6974,8 @@ Future<Void> Transaction::commitMutations() {
 		}
 		return commitResult;
 	} catch (Error& e) {
-		if (e.code() == error_code_transaction_throttled_hot_shard) {
+		if (e.code() == error_code_transaction_throttled_hot_shard ||
+		    e.code() == error_code_transaction_rejected_range_locked) {
 			TraceEvent("TransactionThrottledHotShard").error(e);
 			return onError(e);
 		}
@@ -7830,7 +7836,9 @@ Future<Void> Transaction::onError(Error const& e) {
 	    e.code() == error_code_grv_proxy_memory_limit_exceeded || e.code() == error_code_process_behind ||
 	    e.code() == error_code_batch_transaction_throttled || e.code() == error_code_tag_throttled ||
 	    e.code() == error_code_blob_granule_request_failed || e.code() == error_code_proxy_tag_throttled ||
-	    e.code() == error_code_transaction_throttled_hot_shard) {
+	    e.code() == error_code_transaction_throttled_hot_shard ||
+	    (e.code() == error_code_transaction_rejected_range_locked &&
+	     CLIENT_KNOBS->TRANSACTION_LOCK_REJECTION_RETRIABLE)) {
 		if (e.code() == error_code_not_committed)
 			++trState->cx->transactionsNotCommitted;
 		else if (e.code() == error_code_commit_unknown_result)
@@ -7846,11 +7854,16 @@ Future<Void> Transaction::onError(Error const& e) {
 		} else if (e.code() == error_code_proxy_tag_throttled) {
 			++trState->cx->transactionsThrottled;
 			trState->proxyTagThrottledDuration += CLIENT_KNOBS->PROXY_MAX_TAG_THROTTLE_DURATION;
+		} else if (e.code() == error_code_transaction_rejected_range_locked) {
+			++trState->cx->transactionsLockRejected;
 		}
 
 		double backoff = getBackoff(e.code());
 		reset();
 		return delay(backoff, trState->taskID);
+	} else if (e.code() == error_code_transaction_rejected_range_locked) {
+		ASSERT(!CLIENT_KNOBS->TRANSACTION_LOCK_REJECTION_RETRIABLE);
+		++trState->cx->transactionsLockRejected; // throw error
 	}
 	if (e.code() == error_code_transaction_too_old || e.code() == error_code_future_version) {
 		if (e.code() == error_code_transaction_too_old)
@@ -9075,8 +9088,9 @@ void Transaction::checkDeferredError() const {
 
 Reference<TransactionLogInfo> Transaction::createTrLogInfoProbabilistically(const Database& cx) {
 	if (!cx->isError()) {
-		double clientSamplingProbability =
-		    cx->globalConfig->get<double>(fdbClientInfoTxnSampleRate, CLIENT_KNOBS->CSI_SAMPLING_PROBABILITY);
+		double sampleRate =
+		    cx->globalConfig->get<double>(fdbClientInfoTxnSampleRate, std::numeric_limits<double>::infinity());
+		double clientSamplingProbability = std::isinf(sampleRate) ? CLIENT_KNOBS->CSI_SAMPLING_PROBABILITY : sampleRate;
 		if (((networkOptions.logClientInfo.present() && networkOptions.logClientInfo.get()) || BUGGIFY) &&
 		    deterministicRandom()->random01() < clientSamplingProbability &&
 		    (!g_network->isSimulated() || !g_simulator->speedUpSimulation)) {

@@ -3,7 +3,7 @@
  *
  * This source file is part of the FoundationDB open source project
  *
- * Copyright 2013-2022 Apple Inc. and the FoundationDB project authors
+ * Copyright 2013-2024 Apple Inc. and the FoundationDB project authors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -29,7 +29,6 @@
 #include "fdbrpc/FailureMonitor.h"
 #include "fdbrpc/networksender.actor.h"
 #include "fdbrpc/simulator.h"
-
 #ifdef WITH_SWIFT
 #include <swift/bridging>
 #endif /* WITH_SWIFT */
@@ -605,7 +604,7 @@ public:
 
 	// Must be called on the server before using a ReplyPromiseStream to limit the amount of outstanding bytes to the
 	// client
-	void setByteLimit(int64_t byteLimit) { queue->acknowledgements.bytesLimit = byteLimit; }
+	void setByteLimit(int64_t byteLimit) const { queue->acknowledgements.bytesLimit = byteLimit; }
 
 	void operator=(const ReplyPromiseStream& rhs) {
 		rhs.queue->addPromiseRef();

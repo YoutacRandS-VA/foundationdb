@@ -3,7 +3,7 @@
  *
  * This source file is part of the FoundationDB open source project
  *
- * Copyright 2013-2022 Apple Inc. and the FoundationDB project authors
+ * Copyright 2013-2024 Apple Inc. and the FoundationDB project authors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -36,7 +36,6 @@
 #include "fdbclient/StorageServerInterface.h"
 #include "fdbclient/TagThrottle.actor.h"
 #include "fdbclient/VersionVector.h"
-
 #include "fdbrpc/Stats.h"
 #include "fdbrpc/TimedRequest.h"
 
@@ -727,14 +726,16 @@ struct ExclusionSafetyCheckRequest {
 struct GlobalConfigRefreshReply {
 	constexpr static FileIdentifier file_identifier = 12680327;
 	Arena arena;
+	Version version;
 	RangeResultRef result;
 
 	GlobalConfigRefreshReply() {}
-	GlobalConfigRefreshReply(Arena const& arena, RangeResultRef result) : arena(arena), result(result) {}
+	GlobalConfigRefreshReply(Arena const& arena, Version version, RangeResultRef result)
+	  : arena(arena), version(version), result(result) {}
 
 	template <class Ar>
 	void serialize(Ar& ar) {
-		serializer(ar, result, arena);
+		serializer(ar, result, version, arena);
 	}
 };
 

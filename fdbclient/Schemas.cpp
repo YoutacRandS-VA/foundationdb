@@ -3,7 +3,7 @@
  *
  * This source file is part of the FoundationDB open source project
  *
- * Copyright 2013-2022 Apple Inc. and the FoundationDB project authors
+ * Copyright 2013-2024 Apple Inc. and the FoundationDB project authors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -527,6 +527,14 @@ const KeyRef JSONSchemas::statusSchema = R"statusSchema(
          "lock_uid": "00000000000000000000000000000000"
       },
       "generation":2,
+      "gray_failure" : {
+         "excluded_servers" : [
+            {
+               "address": "127.0.0.1:4500",
+               "time": 1731294251
+            }
+         ]
+      },
       "latency_probe":{
          "read_seconds":7,
          "immediate_priority_transaction_start_seconds":0.0,

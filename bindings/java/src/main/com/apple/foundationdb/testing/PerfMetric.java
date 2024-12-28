@@ -3,7 +3,7 @@
  *
  * This source file is part of the FoundationDB open source project
  *
- * Copyright 2013-2019 Apple Inc. and the FoundationDB project authors
+ * Copyright 2013-2024 Apple Inc. and the FoundationDB project authors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -27,11 +27,11 @@ public class PerfMetric {
 	private String formatCode;
 
 	public PerfMetric(String name, double value) {
-		this(name, value, true, "0.3g");
+		this(name, value, true, "%.3g");
 	}
 
 	public PerfMetric(String name, double value, boolean averaged) {
-		this(name, value, averaged, "0.3g");
+		this(name, value, averaged, "%.3g");
 	}
 
 	public PerfMetric(String name, double value, boolean averaged, String formatCode) {

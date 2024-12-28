@@ -3,7 +3,7 @@
  *
  * This source file is part of the FoundationDB open source project
  *
- * Copyright 2013-2022 Apple Inc. and the FoundationDB project authors
+ * Copyright 2013-2024 Apple Inc. and the FoundationDB project authors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -219,7 +219,7 @@ struct MachineAttritionWorkload : FailureInjectionWorkload {
 		for (const auto& worker : workers) {
 			// kill all matching workers
 			if (idAccess(worker).present() &&
-			    std::count(targets.begin(), targets.end(), idAccess(worker).get().toString())) {
+			    std::find(targets.begin(), targets.end(), idAccess(worker).get().toString()) != targets.end()) {
 				TraceEvent("SendingRebootRequest").detail("TargetWorker", worker.interf.locality.toString());
 				worker.interf.clientInterface.reboot.send(rbReq);
 			}

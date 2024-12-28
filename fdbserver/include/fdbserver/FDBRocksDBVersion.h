@@ -3,7 +3,7 @@
  *
  * This source file is part of the FoundationDB open source project
  *
- * Copyright 2013-2023 Apple Inc. and the FoundationDB project authors
+ * Copyright 2013-2024 Apple Inc. and the FoundationDB project authors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -21,8 +21,8 @@
 #ifndef FDBSERVER_FDBROCKSDBVERSION_H
 #define FDBSERVER_FDBROCKSDBVERSION_H
 
-#define FDB_ROCKSDB_MAJOR 8
-#define FDB_ROCKSDB_MINOR 11
-#define FDB_ROCKSDB_PATCH 4
+#define FDB_ROCKSDB_MAJOR 9
+#define FDB_ROCKSDB_MINOR 7
+#define FDB_ROCKSDB_PATCH 3
 
 #endif

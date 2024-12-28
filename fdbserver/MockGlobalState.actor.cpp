@@ -3,7 +3,7 @@
  *
  * This source file is part of the FoundationDB open source project
  *
- * Copyright 2013-2022 Apple Inc. and the FoundationDB project authors
+ * Copyright 2013-2024 Apple Inc. and the FoundationDB project authors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -227,7 +227,7 @@ bool MockStorageServer::allShardStatusIn(const KeyRangeRef& range, const std::se
 
 	for (auto it = ranges.begin(); it != ranges.end(); ++it) {
 		// fmt::print("allShardStatusIn: {}: {} \n", id.toString(), it->range().toString());
-		if (!status.count(it->cvalue().status))
+		if (!status.contains(it->cvalue().status))
 			return false;
 	}
 	return true;
@@ -679,7 +679,7 @@ void MockGlobalState::addStoragePerProcess(uint64_t defaultDiskSpace) {
 }
 
 bool MockGlobalState::serverIsSourceForShard(const UID& serverId, KeyRangeRef shard, bool inFlightShard) {
-	if (!allServers.count(serverId))
+	if (!allServers.contains(serverId))
 		return false;
 
 	// check serverKeys
@@ -703,9 +703,9 @@ bool MockGlobalState::serverIsDestForShard(const UID& serverId, KeyRangeRef shar
 	TraceEvent(SevDebug, "ServerIsDestForShard")
 	    .detail("ServerId", serverId)
 	    .detail("Keys", shard)
-	    .detail("Contains", allServers.count(serverId));
+	    .detail("Contains", allServers.contains(serverId));
 
-	if (!allServers.count(serverId))
+	if (!allServers.contains(serverId))
 		return false;
 
 	// check serverKeys
@@ -723,7 +723,7 @@ bool MockGlobalState::serverIsDestForShard(const UID& serverId, KeyRangeRef shar
 }
 
 bool MockGlobalState::allShardsRemovedFromServer(const UID& serverId) {
-	return allServers.count(serverId) && shardMapping->getNumberOfShards(serverId) == 0;
+	return allServers.contains(serverId) && shardMapping->getNumberOfShards(serverId) == 0;
 }
 
 Future<std::pair<Optional<StorageMetrics>, int>> MockGlobalState::waitStorageMetrics(

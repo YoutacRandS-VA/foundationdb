@@ -3,7 +3,7 @@
  *
  * This source file is part of the FoundationDB open source project
  *
- * Copyright 2013-2022 Apple Inc. and the FoundationDB project authors
+ * Copyright 2013-2024 Apple Inc. and the FoundationDB project authors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -128,7 +128,7 @@ public:
 					const UID serverId = ssi.id();
 					newServers[serverId] = ssi;
 
-					if (oldServers.count(serverId)) {
+					if (oldServers.contains(serverId)) {
 						if (ssi.getValue.getEndpoint() != oldServers[serverId].getValue.getEndpoint() ||
 						    ssi.isAcceptingRequests() != oldServers[serverId].isAcceptingRequests()) {
 							serverChanges.send(std::make_pair(serverId, Optional<StorageServerInterface>(ssi)));
@@ -384,8 +384,6 @@ public:
 	ACTOR static Future<Void> monitorBlobWorkers(Ratekeeper* self, Reference<AsyncVar<ServerDBInfo> const> dbInfo) {
 		state std::vector<BlobWorkerInterface> blobWorkers;
 		state int workerFetchCount = 0;
-		state double lastStartTime = 0;
-		state double startTime = 0;
 		state bool blobWorkerDead = false;
 		state double lastLoggedTime = 0;
 
@@ -408,9 +406,6 @@ public:
 			} else {
 				grv = self->maxVersion;
 			}
-
-			lastStartTime = startTime;
-			startTime = now();
 
 			if (blobWorkers.size() > 0) {
 				state Future<Optional<BlobManagerBlockedReply>> blockedAssignments;
@@ -622,7 +617,7 @@ public:
 					self.maxVersion = std::max(self.maxVersion, req.version);
 
 					if (recoveryVersion == std::numeric_limits<Version>::max() &&
-					    self.version_recovery.count(recoveryVersion)) {
+					    self.version_recovery.contains(recoveryVersion)) {
 						recoveryVersion = self.maxVersion;
 						self.version_recovery[recoveryVersion] =
 						    self.version_recovery[std::numeric_limits<Version>::max()];
@@ -686,7 +681,7 @@ public:
 						if (recoveryVersion == 0) {
 							recoveryVersion = std::numeric_limits<Version>::max();
 						}
-						if (self.version_recovery.count(recoveryVersion)) {
+						if (self.version_recovery.contains(recoveryVersion)) {
 							auto& it = self.version_recovery[recoveryVersion];
 							double existingEnd = it.second.present() ? it.second.get() : now();
 							double existingDuration = existingEnd - it.first;
@@ -871,8 +866,8 @@ void Ratekeeper::updateRate(RatekeeperLimits* limits) {
 		int64_t minFreeSpace = std::max(SERVER_KNOBS->MIN_AVAILABLE_SPACE,
 		                                (int64_t)(SERVER_KNOBS->MIN_AVAILABLE_SPACE_RATIO * ss.getSmoothTotalSpace()));
 
-		worstFreeSpaceStorageServer =
-		    std::min(worstFreeSpaceStorageServer, (int64_t)ss.getSmoothFreeSpace() - minFreeSpace);
+		worstFreeSpaceStorageServer = std::min(worstFreeSpaceStorageServer,
+		                                       std::max((int64_t)ss.getSmoothFreeSpace() - minFreeSpace, (int64_t)0));
 
 		int64_t springBytes = std::max<int64_t>(
 		    1, std::min<int64_t>(limits->storageSpringBytes, (ss.getSmoothFreeSpace() - minFreeSpace) * 0.2));
@@ -1004,7 +999,7 @@ void Ratekeeper::updateRate(RatekeeperLimits* limits) {
 			ignoredMachines.insert(ss->second->locality.zoneId());
 			continue;
 		}
-		if (ignoredMachines.count(ss->second->locality.zoneId()) > 0) {
+		if (ignoredMachines.contains(ss->second->locality.zoneId())) {
 			continue;
 		}
 
@@ -1026,7 +1021,7 @@ void Ratekeeper::updateRate(RatekeeperLimits* limits) {
 			ignoredDurabilityLagMachines.insert(ss->second->locality.zoneId());
 			continue;
 		}
-		if (ignoredDurabilityLagMachines.count(ss->second->locality.zoneId()) > 0) {
+		if (ignoredDurabilityLagMachines.contains(ss->second->locality.zoneId())) {
 			continue;
 		}
 
@@ -1220,7 +1215,7 @@ void Ratekeeper::updateRate(RatekeeperLimits* limits) {
 			minSSVer = std::min(minSSVer, ss.lastReply.version);
 
 			// Machines that ratekeeper isn't controlling can fall arbitrarily far behind
-			if (ignoredMachines.count(it.value.locality.zoneId()) == 0) {
+			if (!ignoredMachines.contains(it.value.locality.zoneId())) {
 				minLimitingSSVer = std::min(minLimitingSSVer, ss.lastReply.version);
 			}
 		}
@@ -1257,7 +1252,8 @@ void Ratekeeper::updateRate(RatekeeperLimits* limits) {
 		int64_t minFreeSpace = std::max(SERVER_KNOBS->MIN_AVAILABLE_SPACE,
 		                                (int64_t)(SERVER_KNOBS->MIN_AVAILABLE_SPACE_RATIO * tl.getSmoothTotalSpace()));
 
-		worstFreeSpaceTLog = std::min(worstFreeSpaceTLog, (int64_t)tl.getSmoothFreeSpace() - minFreeSpace);
+		worstFreeSpaceTLog =
+		    std::min(worstFreeSpaceTLog, std::max((int64_t)tl.getSmoothFreeSpace() - minFreeSpace, (int64_t)0));
 
 		int64_t springBytes = std::max<int64_t>(
 		    1, std::min<int64_t>(limits->logSpringBytes, (tl.getSmoothFreeSpace() - minFreeSpace) * 0.2));

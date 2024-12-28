@@ -3,7 +3,7 @@
  *
  * This source file is part of the FoundationDB open source project
  *
- * Copyright 2013-2022 Apple Inc. and the FoundationDB project authors
+ * Copyright 2013-2024 Apple Inc. and the FoundationDB project authors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -76,12 +76,12 @@ void ServerThroughputTracker::cleanupUnseenTags(TransactionTagMap<ThroughputCoun
 	while (it != tagToThroughputCounters.end()) {
 		auto& [tag, throughputCounters] = *it;
 		bool seen = false;
-		if (seenReadTags.count(tag)) {
+		if (seenReadTags.contains(tag)) {
 			seen = true;
 		} else {
 			throughputCounters.updateThroughput(0, OpType::READ);
 		}
-		if (seenWriteTags.count(tag)) {
+		if (seenWriteTags.contains(tag)) {
 			seen = true;
 		} else {
 			throughputCounters.updateThroughput(0, OpType::WRITE);
@@ -102,7 +102,7 @@ void ServerThroughputTracker::cleanupUnseenStorageServers(std::unordered_set<UID
 	auto it1 = throughput.begin();
 	while (it1 != throughput.end()) {
 		auto& [ssId, tagToThroughputCounters] = *it1;
-		if (seen.count(ssId)) {
+		if (seen.contains(ssId)) {
 			++it1;
 		} else {
 			auto it2 = tagToThroughputCounters.begin();

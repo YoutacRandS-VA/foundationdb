@@ -5,7 +5,11 @@ set(FORCE_ALL_COMPONENTS OFF CACHE BOOL "Fails cmake if not all dependencies are
 ################################################################################
 
 if(USE_JEMALLOC)
-  find_package(jemalloc 5.3.0 REQUIRED)
+  if(NOT USE_CUSTOM_JEMALLOC)
+    find_package(jemalloc 5.3.0 REQUIRED)
+  else()
+    include(Jemalloc)
+  endif()
 endif()
 
 ################################################################################
@@ -17,7 +21,7 @@ if(USE_VALGRIND)
 endif()
 
 ################################################################################
-# SSL
+# SSL & ZLIB
 ################################################################################
 
 set(CMAKE_REQUIRED_INCLUDES ${OPENSSL_INCLUDE_DIR})
@@ -28,6 +32,8 @@ set(OPENSSL_USE_STATIC_LIBS TRUE)
 if (WIN32)
   set(OPENSSL_MSVC_STATIC_RT ON)
 endif()
+# SSL requires ZLIB
+find_package(ZLIB REQUIRED)
 find_package(OpenSSL REQUIRED)
 add_compile_options(-DHAVE_OPENSSL)
 
@@ -183,7 +189,7 @@ if(toml11_FOUND)
   add_library(toml11_target INTERFACE)
   target_link_libraries(toml11_target INTERFACE toml11::toml11)
 else()
-  include(ExternalProject)  
+  include(ExternalProject)
   ExternalProject_add(toml11Project
     URL "https://github.com/ToruNiina/toml11/archive/v3.4.0.tar.gz"
     URL_HASH SHA256=bc6d733efd9216af8c119d8ac64a805578c79cc82b813e4d1d880ca128bd154d
@@ -226,6 +232,26 @@ else()
 endif()
 
 ################################################################################
+
+# TODO (Vishesh): Replace with target_include_directories.
+include_directories("${CMAKE_CURRENT_BINARY_DIR}/generated/")
+
+find_program(PROTOC_COMPILER protoc)
+if (PROTOC_COMPILER)
+  message(STATUS "Found protoc: ${PROTOC_COMPILER}")
+else ()
+  message(STATUS "protoc compiler not found. Disabing gRPC")
+  set(FLOW_GRPC_ENABLED OFF)
+  find_package(gRPC CONFIG)
+  if (gRPC_FOUND)
+    message(STATUS "gRPC found. Enabling gRPC for Flow.")
+    set(FLOW_GRPC_ENABLED ON)
+    add_compile_definitions(FLOW_GRPC_ENABLED=1)
+  else ()
+    message(WARNING "gRPC not found. Disabling gRPC for Flow.")
+    set(FLOW_GRPC_ENABLED OFF)
+  endif ()
+endif ()
 
 file(MAKE_DIRECTORY ${CMAKE_BINARY_DIR}/packages)
 add_custom_target(packages)

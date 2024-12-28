@@ -3,7 +3,7 @@
  *
  * This source file is part of the FoundationDB open source project
  *
- * Copyright 2013-2022 Apple Inc. and the FoundationDB project authors
+ * Copyright 2013-2024 Apple Inc. and the FoundationDB project authors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -20,7 +20,8 @@
 
 #include "flow/ApiVersion.h"
 #include "fmt/format.h"
-#include "fdbbackup/BackupTLSConfig.h"
+#include "fdbclient/BackupTLSConfig.h"
+#include "fdbbackup/Decode.h"
 #include "fdbclient/JsonBuilder.h"
 #include "flow/Arena.h"
 #include "flow/ArgParseUtil.h"
@@ -1131,7 +1132,7 @@ static void printBackupUsage(bool devhelp) {
 	       "                 This option indicates to the backup agent that it will only need to record the log files, "
 	       "and ignore the range files.\n");
 	printf("  --encryption-key-file"
-	       "                 The AES-128-GCM key in the provided file is used for encrypting backup files.\n");
+	       "                 The AES-256-GCM key in the provided file is used for encrypting backup files.\n");
 	printf("  --encrypt-files 0/1"
 	       "                 If passed, this argument will allow the user to override the database encryption state to "
 	       "either enable (1) or disable (0) encryption at rest with snapshot backups. This option refers to block "
@@ -1215,7 +1216,7 @@ static void printRestoreUsage(bool devhelp) {
 	       "                 Indicates to the backup agent to only begin replaying log files from a certain version, "
 	       "instead of the entire set.\n");
 	printf("  --encryption-key-file"
-	       "                 The AES-128-GCM key in the provided file is used for decrypting backup files.\n");
+	       "                 The AES-256-GCM key in the provided file is used for decrypting backup files.\n");
 	printf("  --blob-manifest-url URL\n"
 	       "                 Restore from blob granules. Manifest files are stored to the destination URL.\n");
 	printf(TLS_HELP);
@@ -3847,12 +3848,26 @@ int main(int argc, char* argv[]) {
 			case OPT_DESCRIBE_TIMESTAMPS:
 				describeTimestamps = true;
 				break;
-			case OPT_PREFIX_ADD:
-				addPrefix = args->OptionArg();
+			case OPT_PREFIX_ADD: {
+				bool err = false;
+				addPrefix = decode_hex_string(args->OptionArg(), err);
+				if (err) {
+					fprintf(stderr, "ERROR: Could not parse add prefix\n");
+					printHelpTeaser(argv[0]);
+					return FDB_EXIT_ERROR;
+				}
 				break;
-			case OPT_PREFIX_REMOVE:
-				removePrefix = args->OptionArg();
+			}
+			case OPT_PREFIX_REMOVE: {
+				bool err = false;
+				removePrefix = decode_hex_string(args->OptionArg(), err);
+				if (err) {
+					fprintf(stderr, "ERROR: Could not parse remove prefix\n");
+					printHelpTeaser(argv[0]);
+					return FDB_EXIT_ERROR;
+				}
 				break;
+			}
 			case OPT_ERRORLIMIT: {
 				const char* a = args->OptionArg();
 				if (!sscanf(a, "%d", &maxErrors)) {
@@ -4141,6 +4156,16 @@ int main(int argc, char* argv[]) {
 			Optional<Database> result = connectToCluster(clusterFile, localities, quiet);
 			if (result.present()) {
 				db = result.get();
+				// Make sure we are setting a transaction timeout and retry limit to prevent cases
+				// where the fdbbackup command hangs infinitely. 60 seconds should be more than
+				// enough for all cases to finish and 5 retries should also be good enough for
+				// most cases.
+				int64_t timeout = 60000;
+				db->setOption(FDBDatabaseOptions::TRANSACTION_TIMEOUT,
+				              Optional<StringRef>(StringRef((const uint8_t*)&timeout, sizeof(timeout))));
+				int64_t retryLimit = 5;
+				db->setOption(FDBDatabaseOptions::TRANSACTION_RETRY_LIMIT,
+				              Optional<StringRef>(StringRef((const uint8_t*)&retryLimit, sizeof(retryLimit))));
 			}
 
 			return result.present();
@@ -4157,6 +4182,16 @@ int main(int argc, char* argv[]) {
 			Optional<Database> result = connectToCluster(sourceClusterFile, localities, quiet);
 			if (result.present()) {
 				sourceDb = result.get();
+				// Make sure we are setting a transaction timeout and retry limit to prevent cases
+				// where the fdbbackup command hangs infinitely. 60 seconds should be more than
+				// enough for all cases to finish and 5 retries should also be good enough for
+				// most cases.
+				int64_t timeout = 60000;
+				sourceDb->setOption(FDBDatabaseOptions::TRANSACTION_TIMEOUT,
+				                    Optional<StringRef>(StringRef((const uint8_t*)&timeout, sizeof(timeout))));
+				int64_t retryLimit = 5;
+				sourceDb->setOption(FDBDatabaseOptions::TRANSACTION_RETRY_LIMIT,
+				                    Optional<StringRef>(StringRef((const uint8_t*)&retryLimit, sizeof(retryLimit))));
 			}
 
 			return result.present();

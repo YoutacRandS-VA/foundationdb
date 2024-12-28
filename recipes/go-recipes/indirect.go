@@ -3,7 +3,7 @@
  *
  * This source file is part of the FoundationDB open source project
  *
- * Copyright 2013-2018 Apple Inc. and the FoundationDB project authors
+ * Copyright 2013-2024 Apple Inc. and the FoundationDB project authors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -56,8 +56,8 @@ func _pack(t interface{}) []byte {
 }
 
 func _unpack(t []byte) tuple.Tuple {
-	i, e := tuple.Unpack(t)
-	if e != nil {
+	i, err := tuple.Unpack(t)
+	if err != nil {
 		return nil
 	}
 	return i

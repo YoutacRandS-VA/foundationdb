@@ -3,7 +3,7 @@
  *
  * This source file is part of the FoundationDB open source project
  *
- * Copyright 2013-2022 Apple Inc. and the FoundationDB project authors
+ * Copyright 2013-2024 Apple Inc. and the FoundationDB project authors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -252,7 +252,7 @@ Future<Void> TCServerInfo::updateStoreType() {
 void TCServerInfo::removeTeamsContainingServer(UID removedServer) {
 	for (int t = 0; t < teams.size(); t++) {
 		auto const& serverIds = teams[t]->getServerIDs();
-		if (std::count(serverIds.begin(), serverIds.end(), removedServer)) {
+		if (std::find(serverIds.begin(), serverIds.end(), removedServer) != serverIds.end()) {
 			teams[t--] = teams.back();
 			teams.pop_back();
 		}

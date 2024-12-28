@@ -3,7 +3,7 @@
  *
  * This source file is part of the FoundationDB open source project
  *
- * Copyright 2013-2022 Apple Inc. and the FoundationDB project authors
+ * Copyright 2013-2024 Apple Inc. and the FoundationDB project authors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -99,7 +99,7 @@ struct DataLossRecoveryWorkload : TestWorkload {
 
 		// Reenable DD and exclude address as fail, so that [key, endKey) will be dropped and moved to a new team.
 		// Expect read to return 'value not found'.
-		int ignore = wait(setDDMode(cx, 1));
+		wait(success(setDDMode(cx, 1)));
 		wait(self->exclude(cx, address));
 		TraceEvent("DataLossRecovery").detail("Phase", "Excluded");
 		wait(self->readAndVerify(self, cx, key, Optional<Value>()));
@@ -185,7 +185,7 @@ struct DataLossRecoveryWorkload : TestWorkload {
 	// Returns the address of the single SS of the new team.
 	ACTOR Future<NetworkAddress> disableDDAndMoveShard(DataLossRecoveryWorkload* self, Database cx, KeyRange keys) {
 		// Disable DD to avoid DD undoing of our move.
-		state int ignore = wait(setDDMode(cx, 0));
+		wait(success(setDDMode(cx, 0)));
 		TraceEvent("DataLossRecovery").detail("Phase", "DisabledDD");
 		state NetworkAddress addr;
 
@@ -195,7 +195,7 @@ struct DataLossRecoveryWorkload : TestWorkload {
 			state std::vector<StorageServerInterface> interfs = wait(getStorageServers(cx));
 			if (!interfs.empty()) {
 				state StorageServerInterface interf = interfs[deterministicRandom()->randomInt(0, interfs.size())];
-				if (g_simulator->protectedAddresses.count(interf.address()) == 0) {
+				if (!g_simulator->protectedAddresses.contains(interf.address())) {
 					// We need to avoid selecting a storage server that is already dead at this point, otherwise
 					// the test will hang. This is achieved by sending a GetStorageMetrics RPC. This is a necessary
 					// check for this test because DD has been disabled and the proper mechanism that removes bad
@@ -250,7 +250,8 @@ struct DataLossRecoveryWorkload : TestWorkload {
 					                                          false,
 					                                          UID(), // for logging only
 					                                          &ddEnabledState,
-					                                          CancelConflictingDataMoves::True);
+					                                          CancelConflictingDataMoves::True,
+					                                          Optional<BulkLoadState>());
 				} else {
 					UID dataMoveId = newDataMoveId(deterministicRandom()->randomUInt64(),
 					                               AssignEmptyRange(false),
@@ -268,7 +269,8 @@ struct DataLossRecoveryWorkload : TestWorkload {
 					                                          false,
 					                                          UID(), // for logging only
 					                                          &ddEnabledState,
-					                                          CancelConflictingDataMoves::True);
+					                                          CancelConflictingDataMoves::True,
+					                                          Optional<BulkLoadState>());
 				}
 				wait(moveKeys(cx, *params));
 				break;

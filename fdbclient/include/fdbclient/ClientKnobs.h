@@ -3,7 +3,7 @@
  *
  * This source file is part of the FoundationDB open source project
  *
- * Copyright 2013-2022 Apple Inc. and the FoundationDB project authors
+ * Copyright 2013-2024 Apple Inc. and the FoundationDB project authors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -181,6 +181,7 @@ public:
 	int BACKUP_RANGEFILE_BLOCK_SIZE;
 	int BACKUP_LOGFILE_BLOCK_SIZE;
 	int BACKUP_DISPATCH_ADDTASK_SIZE;
+	bool BACKUP_ALLOW_DRYRUN;
 	int RESTORE_DISPATCH_ADDTASK_SIZE;
 	int RESTORE_DISPATCH_BATCH_SIZE;
 	int RESTORE_WRITE_TX_SIZE;
@@ -291,6 +292,10 @@ public:
 	double GLOBAL_TAG_THROTTLING_RW_FUNGIBILITY_RATIO;
 	// Maximum duration that a transaction can be tag throttled by proxy before being rejected
 	double PROXY_MAX_TAG_THROTTLE_DURATION;
+
+	// Enable to automatically retry transactions in the presence of transaction_lock_rejection error
+	// Set to false only for the rangeLocking simulation test
+	bool TRANSACTION_LOCK_REJECTION_RETRIABLE;
 
 	// busyness reporting
 	double BUSYNESS_SPIKE_START_THRESHOLD;

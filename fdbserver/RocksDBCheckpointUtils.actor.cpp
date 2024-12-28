@@ -3,7 +3,7 @@
  *
  * This source file is part of the FoundationDB open source project
  *
- * Copyright 2013-2022 Apple Inc. and the FoundationDB project authors
+ * Copyright 2013-2024 Apple Inc. and the FoundationDB project authors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -131,7 +131,7 @@ rocksdb::Options getOptions() {
 rocksdb::ReadOptions getReadOptions() {
 	rocksdb::ReadOptions options;
 	options.background_purge_on_iterator_cleanup = true;
-	options.auto_prefix_mode = (SERVER_KNOBS->ROCKSDB_PREFIX_LEN > 0);
+	options.auto_prefix_mode = (SERVER_KNOBS->SHARDED_ROCKSDB_PREFIX_LEN > 0);
 	return options;
 }
 
@@ -255,8 +255,7 @@ ACTOR Future<Void> fetchCheckpointBytesSampleFile(Database cx,
 	ASSERT(!metaData->src.empty());
 	state UID ssId = metaData->src.front();
 
-	int64_t fileSize =
-	    wait(doFetchCheckpointFile(cx, metaData->bytesSampleFile.get(), localFile, ssId, metaData->checkpointID));
+	wait(success(doFetchCheckpointFile(cx, metaData->bytesSampleFile.get(), localFile, ssId, metaData->checkpointID)));
 	metaData->bytesSampleFile = localFile;
 	if (cFun) {
 		wait(cFun(*metaData));
@@ -281,9 +280,13 @@ public:
 			options.iterate_upper_bound = &endSlice;
 			options.fill_cache = false; // Optimized for bulk scan.
 			options.readahead_size = SERVER_KNOBS->ROCKSDB_CHECKPOINT_READ_AHEAD_SIZE;
-			const uint64_t deadlineMicros =
-			    reader->db->GetEnv()->NowMicros() + SERVER_KNOBS->ROCKSDB_READ_CHECKPOINT_TIMEOUT * 1000000;
-			options.deadline = std::chrono::microseconds(deadlineMicros);
+			// Note: ROCKSDB_SET_READ_TIMEOUT is false in simulation. If turned on, this code could lead to
+			// non-deterministic simulation because of db->GetEnv()->NowMicros().
+			if (SERVER_KNOBS->ROCKSDB_SET_READ_TIMEOUT) {
+				const uint64_t deadlineMicros =
+				    reader->db->GetEnv()->NowMicros() + SERVER_KNOBS->ROCKSDB_READ_CHECKPOINT_TIMEOUT * 1000000;
+				options.deadline = std::chrono::microseconds(deadlineMicros);
+			}
 			this->iterator = std::unique_ptr<rocksdb::Iterator>(reader->db->NewIterator(options, reader->cf));
 			iterator->Seek(this->beginSlice);
 		}
@@ -363,7 +366,7 @@ private:
 			ThreadReturnPromise<RangeResult> result;
 		};
 
-		explicit Reader(DB& db, CF& cf, const UID& logId);
+		explicit Reader(DB& db, CF& cf, std::vector<rocksdb::ColumnFamilyHandle*>& handles, const UID& logId);
 		~Reader() override {}
 
 		void init() override {}
@@ -382,7 +385,7 @@ private:
 
 		DB& db;
 		CF& cf;
-		std::vector<rocksdb::ColumnFamilyHandle*> handles;
+		std::vector<rocksdb::ColumnFamilyHandle*>& handles;
 		double readRangeTimeout;
 		const UID logId;
 	};
@@ -393,6 +396,7 @@ private:
 
 	DB db = nullptr;
 	CF cf = nullptr;
+	std::vector<rocksdb::ColumnFamilyHandle*> handles;
 	std::string path;
 	const UID logId;
 	Version version;
@@ -416,7 +420,7 @@ RocksDBColumnFamilyReader::RocksDBColumnFamilyReader(const CheckpointMetaData& c
 		threads = createGenericThreadPool();
 	}
 	for (int i = 0; i < SERVER_KNOBS->ROCKSDB_CHECKPOINT_READER_PARALLELISM; ++i) {
-		threads->addThread(new Reader(db, cf, logId), "fdb-rocks-cr");
+		threads->addThread(new Reader(db, cf, handles, logId), "fdb-rocks-cr");
 	}
 	if (checkpoint.getFormat() == DataMoveRocksCF) {
 		const RocksDBColumnFamilyCheckpoint rocksCF = getRocksCF(checkpoint);
@@ -459,7 +463,11 @@ std::unique_ptr<ICheckpointIterator> RocksDBColumnFamilyReader::getIterator(KeyR
 	}
 }
 
-RocksDBColumnFamilyReader::Reader::Reader(DB& db, CF& cf, const UID& logId) : db(db), cf(cf), logId(logId) {}
+RocksDBColumnFamilyReader::Reader::Reader(DB& db,
+                                          CF& cf,
+                                          std::vector<rocksdb::ColumnFamilyHandle*>& handles,
+                                          const UID& logId)
+  : db(db), cf(cf), handles(handles), logId(logId) {}
 
 void RocksDBColumnFamilyReader::Reader::action(RocksDBColumnFamilyReader::Reader::OpenAction& a) {
 	TraceEvent(SevDebug, "RocksDBCheckpointReaderInitBegin", logId).detail("Checkpoint", a.checkpoint.toString());
@@ -772,6 +780,46 @@ bool RocksDBSstFileWriter::finish() {
 	return true;
 }
 
+class RocksDBSstFileReader : public IRocksDBSstFileReader {
+public:
+	RocksDBSstFileReader() : sstReader(std::make_unique<rocksdb::SstFileReader>(rocksdb::Options())){};
+	~RocksDBSstFileReader() {}
+
+	void open(const std::string localFile) override;
+
+	KeyValue next() override;
+
+	bool hasNext() const override;
+
+private:
+	std::unique_ptr<rocksdb::SstFileReader> sstReader;
+	std::unique_ptr<rocksdb::Iterator> iter;
+	std::string localFile;
+};
+
+void RocksDBSstFileReader::open(const std::string localFile) {
+	this->localFile = abspath(localFile);
+	rocksdb::Status status = sstReader->Open(this->localFile);
+	if (status.ok()) {
+		iter.reset(sstReader->NewIterator(getReadOptions()));
+		iter->SeekToFirst();
+	} else {
+		TraceEvent(SevError, "RocksDBSstFileReaderWrapperOpenFileError")
+		    .detail("LocalFile", this->localFile)
+		    .detail("Status", status.ToString());
+	}
+}
+
+bool RocksDBSstFileReader::hasNext() const {
+	return iter != nullptr && this->iter->Valid();
+}
+
+KeyValue RocksDBSstFileReader::next() {
+	KeyValue res(KeyValueRef(toStringRef(this->iter->key()), toStringRef(this->iter->value())));
+	iter->Next();
+	return res;
+}
+
 class RocksDBCheckpointByteSampleReader : public ICheckpointByteSampleReader {
 public:
 	RocksDBCheckpointByteSampleReader(const CheckpointMetaData& checkpoint);
@@ -925,7 +973,7 @@ ACTOR Future<Void> fetchCheckpointFile(Database cx,
 	ASSERT_EQ(metaData->src.size(), 1);
 	const UID ssId = metaData->src.front();
 
-	int64_t fileSize = wait(doFetchCheckpointFile(cx, remoteFile, localFile, ssId, metaData->checkpointID));
+	wait(success(doFetchCheckpointFile(cx, remoteFile, localFile, ssId, metaData->checkpointID)));
 	rocksCF.sstFiles[idx].db_path = dir;
 	rocksCF.sstFiles[idx].fetched = true;
 	metaData->serializedCheckpoint = ObjectWriter::toValue(rocksCF, IncludeVersion());
@@ -1283,6 +1331,14 @@ std::unique_ptr<IRocksDBSstFileWriter> newRocksDBSstFileWriter() {
 #ifdef WITH_ROCKSDB
 	std::unique_ptr<IRocksDBSstFileWriter> sstWriter = std::make_unique<RocksDBSstFileWriter>();
 	return sstWriter;
+#endif // WITH_ROCKSDB
+	return nullptr;
+}
+
+std::unique_ptr<IRocksDBSstFileReader> newRocksDBSstFileReader() {
+#ifdef WITH_ROCKSDB
+	std::unique_ptr<IRocksDBSstFileReader> sstReader = std::make_unique<RocksDBSstFileReader>();
+	return sstReader;
 #endif // WITH_ROCKSDB
 	return nullptr;
 }

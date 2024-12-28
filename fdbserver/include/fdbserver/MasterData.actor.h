@@ -3,7 +3,7 @@
  *
  * This source file is part of the FoundationDB open source project
  *
- * Copyright 2013-2022 Apple Inc. and the FoundationDB project authors
+ * Copyright 2013-2024 Apple Inc. and the FoundationDB project authors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -127,11 +127,11 @@ struct SWIFT_CXX_REF_MASTERDATA MasterData : NonCopyable, ReferenceCounted<Maste
 	CounterValue reportLiveCommittedVersionRequests;
 	// This counter gives an estimate of the number of non-empty peeks that storage servers
 	// should do from tlogs (in the worst case, ignoring blocking peek timeouts).
-	LatencySample versionVectorTagUpdates;
+	std::unique_ptr<LatencySample> versionVectorTagUpdates;
 	CounterValue waitForPrevCommitRequests;
 	CounterValue nonWaitForPrevCommitRequests;
-	LatencySample versionVectorSizeOnCVReply;
-	LatencySample waitForPrevLatencies;
+	std::unique_ptr<LatencySample> versionVectorSizeOnCVReply;
+	std::unique_ptr<LatencySample> waitForPrevLatencies;
 
 	PromiseStream<Future<Void>> addActor;
 

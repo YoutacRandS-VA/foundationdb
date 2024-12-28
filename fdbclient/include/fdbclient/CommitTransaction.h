@@ -3,7 +3,7 @@
  *
  * This source file is part of the FoundationDB open source project
  *
- * Copyright 2013-2022 Apple Inc. and the FoundationDB project authors
+ * Copyright 2013-2024 Apple Inc. and the FoundationDB project authors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -650,20 +650,17 @@ struct CommitTransactionRef {
 			           spanContext,
 			           tenantIds);
 		} else {
-			serializer(ar, read_conflict_ranges, write_conflict_ranges, mutations, read_snapshot);
-			if (ar.protocolVersion().hasReportConflictingKeys()) {
-				serializer(ar, report_conflicting_keys);
-			}
-			if (ar.protocolVersion().hasResolverPrivateMutations()) {
-				serializer(ar, lock_aware);
-				if (!ar.protocolVersion().hasOTELSpanContext()) {
-					Optional<UID> context;
-					serializer(ar, context);
-					if (context.present()) {
-						SpanContext res;
-						res.traceID = context.get();
-						spanContext = res;
-					}
+			serializer(
+			    ar, read_conflict_ranges, write_conflict_ranges, mutations, read_snapshot, report_conflicting_keys);
+			ASSERT_WE_THINK(ar.protocolVersion().hasResolverPrivateMutations());
+			serializer(ar, lock_aware);
+			if (!ar.protocolVersion().hasOTELSpanContext()) {
+				Optional<UID> context;
+				serializer(ar, context);
+				if (context.present()) {
+					SpanContext res;
+					res.traceID = context.get();
+					spanContext = res;
 				}
 			}
 			if (ar.protocolVersion().hasOTELSpanContext()) {

@@ -3,7 +3,7 @@
  *
  * This source file is part of the FoundationDB open source project
  *
- * Copyright 2013-2023 Apple Inc. and the FoundationDB project authors
+ * Copyright 2013-2024 Apple Inc. and the FoundationDB project authors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -129,16 +129,13 @@ struct ClogTlogWorkload : TestWorkload {
 	}
 
 	ACTOR static Future<Void> excludeFailedLog(ClogTlogWorkload* self, Database cx) {
-		state Future<Void> timeout = delay(30);
-
 		loop choose {
 			when(wait(self->dbInfo->onChange())) {
 				if (self->dbInfo->get().recoveryState >= RecoveryState::ACCEPTING_COMMITS) {
 					return Void();
 				}
-				timeout = delay(30);
 			}
-			when(wait(timeout)) {
+			when(wait(delay(30))) {
 				// recovery state hasn't changed in 30s, exclude the failed tlog
 				CODE_PROBE(true, "Exclude failed tlog");
 				TraceEvent("ExcludeFailedLog")

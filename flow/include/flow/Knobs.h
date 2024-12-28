@@ -3,7 +3,7 @@
  *
  * This source file is part of the FoundationDB open source project
  *
- * Copyright 2013-2022 Apple Inc. and the FoundationDB project authors
+ * Copyright 2013-2024 Apple Inc. and the FoundationDB project authors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -187,6 +187,9 @@ public:
 	double INCOMPATIBLE_PEER_DELAY_BEFORE_LOGGING;
 	double PING_LOGGING_INTERVAL;
 	double PING_SKETCH_ACCURACY;
+	bool LOG_CONNECTION_ATTEMPTS_ENABLED;
+	int LOG_CONNECTION_INTERVAL_SECS;
+	std::string CONNECTION_LOG_DIRECTORY;
 
 	int TLS_CERT_REFRESH_DELAY_SECONDS;
 	double TLS_SERVER_CONNECTION_THROTTLE_TIMEOUT;

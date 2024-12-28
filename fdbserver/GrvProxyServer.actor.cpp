@@ -3,7 +3,7 @@
  *
  * This source file is part of the FoundationDB open source project
  *
- * Copyright 2013-2022 Apple Inc. and the FoundationDB project authors
+ * Copyright 2013-2024 Apple Inc. and the FoundationDB project authors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -199,7 +199,7 @@ struct GrvProxyData {
 	Optional<LatencyBandConfig> latencyBandConfig;
 	double lastStartCommit;
 	double lastCommitLatency;
-	LatencySample versionVectorSizeOnGRVReply;
+	std::unique_ptr<LatencySample> versionVectorSizeOnGRVReply;
 	int updateCommitRequests;
 	NotifiedDouble lastCommitTime;
 
@@ -234,13 +234,17 @@ struct GrvProxyData {
 	             Reference<AsyncVar<ServerDBInfo> const> db)
 	  : dbgid(dbgid), stats(dbgid), master(master), getConsistentReadVersion(getConsistentReadVersion),
 	    cx(openDBOnServer(db, TaskPriority::DefaultEndpoint, LockAware::True)), db(db), lastStartCommit(0),
-	    lastCommitLatency(SERVER_KNOBS->REQUIRED_MIN_RECOVERY_DURATION),
-	    versionVectorSizeOnGRVReply("VersionVectorSizeOnGRVReply",
-	                                dbgid,
-	                                SERVER_KNOBS->LATENCY_METRICS_LOGGING_INTERVAL,
-	                                SERVER_KNOBS->LATENCY_SKETCH_ACCURACY),
-	    updateCommitRequests(0), lastCommitTime(0), version(0), minKnownCommittedVersion(invalidVersion),
-	    tagThrottler(CLIENT_KNOBS->PROXY_MAX_TAG_THROTTLE_DURATION) {}
+	    lastCommitLatency(SERVER_KNOBS->REQUIRED_MIN_RECOVERY_DURATION), updateCommitRequests(0), lastCommitTime(0),
+	    version(0), minKnownCommittedVersion(invalidVersion),
+	    tagThrottler(CLIENT_KNOBS->PROXY_MAX_TAG_THROTTLE_DURATION) {
+		if (SERVER_KNOBS->ENABLE_VERSION_VECTOR) {
+			versionVectorSizeOnGRVReply =
+			    std::make_unique<LatencySample>("VersionVectorSizeOnGRVReply",
+			                                    dbgid,
+			                                    SERVER_KNOBS->LATENCY_METRICS_LOGGING_INTERVAL,
+			                                    SERVER_KNOBS->LATENCY_SKETCH_ACCURACY);
+		}
+	}
 };
 
 ACTOR Future<Void> healthMetricsRequestServer(GrvProxyInterface grvProxy,
@@ -363,7 +367,7 @@ ACTOR Future<Void> globalConfigRequestServer(GrvProxyData* grvProxyData, GrvProx
 				// point of view. The client learns the version through a
 				// ClientDBInfo update).
 				if (refresh.lastKnown <= cachedVersion) {
-					refresh.reply.send(GlobalConfigRefreshReply{ cachedData.arena(), cachedData });
+					refresh.reply.send(GlobalConfigRefreshReply{ cachedData.arena(), cachedVersion, cachedData });
 				} else {
 					refresh.reply.sendError(future_version());
 				}
@@ -399,7 +403,7 @@ ACTOR Future<Void> getRate(UID myID,
 	state Future<GetRateInfoReply> reply = Never();
 	state double lastDetailedReply = 0.0; // request detailed metrics immediately
 	state bool expectingDetailedReply = false;
-	state int64_t lastTC = 0;
+	// state int64_t lastTC = 0;
 
 	if (db->get().ratekeeper.present())
 		nextRequestTimer = Void();
@@ -437,7 +441,7 @@ ACTOR Future<Void> getRate(UID myID,
 			stats->batchTransactionRateAllowed = rep.batchTransactionRate;
 			++stats->updatesFromRatekeeper;
 			//TraceEvent("GrvProxyRate", myID).detail("Rate", rep.transactionRate).detail("BatchRate", rep.batchTransactionRate).detail("Lease", rep.leaseDuration).detail("ReleasedTransactions", *inTransactionCount - lastTC);
-			lastTC = *inTransactionCount;
+			// lastTC = *inTransactionCount;
 			leaseTimeout = delay(rep.leaseDuration);
 			nextRequestTimer = delayJittered(rep.leaseDuration / 2);
 			healthMetricsReply->update(rep.healthMetrics, expectingDetailedReply, true);
@@ -748,7 +752,7 @@ ACTOR Future<Void> sendGrvReplies(Future<GetReadVersionReply> replyFuture,
 		reply.tagThrottleInfo.clear();
 		if (SERVER_KNOBS->ENABLE_VERSION_VECTOR) {
 			grvProxyData->ssVersionVectorCache.getDelta(request.maxVersion, reply.ssVersionVectorDelta);
-			grvProxyData->versionVectorSizeOnGRVReply.addMeasurement(reply.ssVersionVectorDelta.size());
+			grvProxyData->versionVectorSizeOnGRVReply->addMeasurement(reply.ssVersionVectorDelta.size());
 		}
 		reply.proxyId = grvProxyData->dbgid;
 		reply.proxyTagThrottledDuration = request.proxyTagThrottledDuration;
@@ -1150,7 +1154,8 @@ ACTOR Future<Void> checkRemoved(Reference<AsyncVar<ServerDBInfo> const> db,
                                 GrvProxyInterface myInterface) {
 	loop {
 		if (db->get().recoveryCount >= recoveryCount &&
-		    !std::count(db->get().client.grvProxies.begin(), db->get().client.grvProxies.end(), myInterface)) {
+		    std::find(db->get().client.grvProxies.begin(), db->get().client.grvProxies.end(), myInterface) ==
+		        db->get().client.grvProxies.end()) {
 			throw worker_removed();
 		}
 		wait(db->onChange());

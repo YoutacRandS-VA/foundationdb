@@ -3,7 +3,7 @@
  *
  * This source file is part of the FoundationDB open source project
  *
- * Copyright 2013-2022 Apple Inc. and the FoundationDB project authors
+ * Copyright 2013-2024 Apple Inc. and the FoundationDB project authors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -259,7 +259,8 @@ void AccumulativeChecksumValidator::restore(const AccumulativeChecksumState& acs
 		    .detail("AcsState", acsState.toString());
 		throw please_reboot();
 	}
-	acsTable[acsIndex] = acsState;
+	auto res = acsTable.insert({ acsIndex, acsState });
+	ASSERT(res.second); // Each acsIndex has persisted one ACS value
 	if (CLIENT_KNOBS->ENABLE_ACCUMULATIVE_CHECKSUM_LOGGING) {
 		TraceEvent(SevInfo, "AcsValidatorRestore", ssid)
 		    .detail("AcsIndex", acsIndex)

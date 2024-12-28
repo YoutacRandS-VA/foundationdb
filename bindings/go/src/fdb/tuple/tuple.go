@@ -3,7 +3,7 @@
  *
  * This source file is part of the FoundationDB open source project
  *
- * Copyright 2013-2018 Apple Inc. and the FoundationDB project authors
+ * Copyright 2013-2024 Apple Inc. and the FoundationDB project authors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -433,7 +433,6 @@ func (p *packer) encodeTuple(t Tuple, nested bool, versionstamps bool) {
 //
 // This method will panic if it contains an incomplete Versionstamp. Use
 // PackWithVersionstamp instead.
-//
 func (t Tuple) Pack() []byte {
 	p := newPacker()
 	p.encodeTuple(t, false, false)

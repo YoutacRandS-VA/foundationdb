@@ -3,7 +3,7 @@
  *
  * This source file is part of the FoundationDB open source project
  *
- * Copyright 2013-2022 Apple Inc. and the FoundationDB project authors
+ * Copyright 2013-2024 Apple Inc. and the FoundationDB project authors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -98,12 +98,14 @@ struct IDataDistributionTeam {
 
 FDB_BOOLEAN_PARAM(WantNewServers);
 FDB_BOOLEAN_PARAM(WantTrueBest);
+FDB_BOOLEAN_PARAM(WantTrueBestIfMoveout);
 FDB_BOOLEAN_PARAM(PreferLowerDiskUtil);
 FDB_BOOLEAN_PARAM(TeamMustHaveShards);
 FDB_BOOLEAN_PARAM(ForReadBalance);
 FDB_BOOLEAN_PARAM(PreferLowerReadUtil);
 FDB_BOOLEAN_PARAM(FindTeamByServers);
 FDB_BOOLEAN_PARAM(PreferWithinShardLimit);
+FDB_BOOLEAN_PARAM(FindTeamForBulkLoad);
 
 class TeamSelect {
 public:
@@ -143,8 +145,10 @@ struct GetTeamRequest {
 	bool preferWithinShardLimit;
 	double inflightPenalty;
 	bool findTeamByServers;
+	bool findTeamForBulkLoad;
 	Optional<KeyRange> keys;
-	bool storageQueueAware;
+	bool storageQueueAware = false;
+	bool wantTrueBestIfMoveout = false;
 
 	// completeSources have all shards in the key range being considered for movement, src have at least 1 shard in the
 	// key range for movement. From the point of set, completeSources is the Intersection set of several <server_lists>,
@@ -170,13 +174,15 @@ struct GetTeamRequest {
 	  : teamSelect(teamSelectRequest), storageQueueAware(false), preferLowerDiskUtil(preferLowerDiskUtil),
 	    teamMustHaveShards(teamMustHaveShards), forReadBalance(forReadBalance),
 	    preferLowerReadUtil(preferLowerReadUtil), preferWithinShardLimit(preferWithinShardLimit),
-	    inflightPenalty(inflightPenalty), findTeamByServers(FindTeamByServers::False), keys(keys) {}
+	    inflightPenalty(inflightPenalty), findTeamByServers(FindTeamByServers::False),
+	    findTeamForBulkLoad(FindTeamForBulkLoad::False), keys(keys), wantTrueBestIfMoveout(false) {}
 	GetTeamRequest(std::vector<UID> servers)
 	  : teamSelect(TeamSelect::WANT_COMPLETE_SRCS), storageQueueAware(false),
 	    preferLowerDiskUtil(PreferLowerDiskUtil::False), teamMustHaveShards(TeamMustHaveShards::False),
 	    forReadBalance(ForReadBalance::False), preferLowerReadUtil(PreferLowerReadUtil::False),
 	    preferWithinShardLimit(PreferWithinShardLimit::False), inflightPenalty(1.0),
-	    findTeamByServers(FindTeamByServers::True), src(std::move(servers)) {}
+	    findTeamByServers(FindTeamByServers::True), findTeamForBulkLoad(FindTeamForBulkLoad::False),
+	    src(std::move(servers)), wantTrueBestIfMoveout(false) {}
 
 	// return true if a.score < b.score
 	[[nodiscard]] bool lessCompare(TeamRef a, TeamRef b, int64_t aLoadBytes, int64_t bLoadBytes) const {
@@ -191,10 +197,10 @@ struct GetTeamRequest {
 		std::stringstream ss;
 
 		ss << "TeamSelect:" << teamSelect.toString() << " StorageQueueAware:" << storageQueueAware
-		   << " PreferLowerDiskUtil:" << preferLowerDiskUtil << " PreferLowerReadUtil:" << preferLowerReadUtil
-		   << " PreferWithinShardLimit:" << preferWithinShardLimit << " teamMustHaveShards:" << teamMustHaveShards
-		   << " forReadBalance:" << forReadBalance << " inflightPenalty:" << inflightPenalty
-		   << " findTeamByServers:" << findTeamByServers << ";";
+		   << " WantTrueBestIfMoveout:" << wantTrueBestIfMoveout << " PreferLowerDiskUtil:" << preferLowerDiskUtil
+		   << " PreferLowerReadUtil:" << preferLowerReadUtil << " PreferWithinShardLimit:" << preferWithinShardLimit
+		   << " teamMustHaveShards:" << teamMustHaveShards << " forReadBalance:" << forReadBalance
+		   << " inflightPenalty:" << inflightPenalty << " findTeamByServers:" << findTeamByServers << ";";
 		ss << "CompleteSources:";
 		for (const auto& cs : completeSources) {
 			ss << cs.toString() << ",";

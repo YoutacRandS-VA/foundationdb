@@ -3,7 +3,7 @@
  *
  * This source file is part of the FoundationDB open source project
  *
- * Copyright 2013-2023 Apple Inc. and the FoundationDB project authors
+ * Copyright 2013-2024 Apple Inc. and the FoundationDB project authors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -29,7 +29,9 @@
 #include "flow/IUDPSocket.h"
 #include "flow/TDMetric.actor.h"
 #include "flow/ChaosMetrics.h"
+#include "flow/Histogram.h"
 
+#include "fdbrpc/Locality.h"
 #include "fdbrpc/SimulatorMachineInfo.h"
 #include "fdbrpc/SimulatorKillType.h"
 

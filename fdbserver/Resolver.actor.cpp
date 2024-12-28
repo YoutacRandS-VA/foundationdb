@@ -3,7 +3,7 @@
  *
  * This source file is part of the FoundationDB open source project
  *
- * Copyright 2013-2022 Apple Inc. and the FoundationDB project authors
+ * Copyright 2013-2024 Apple Inc. and the FoundationDB project authors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -483,7 +483,7 @@ ACTOR Future<Void> resolveBatch(Reference<Resolver> self,
 				reply.tpcvMap.clear();
 			} else {
 				std::set<uint16_t> writtenTLogs;
-				if (shardChangedOrStateTxn || req.txnStateTransactions.size()) {
+				if (shardChangedOrStateTxn || req.txnStateTransactions.size() || !req.writtenTags.size()) {
 					for (int i = 0; i < self->numLogs; i++) {
 						writtenTLogs.insert(i);
 					}
@@ -666,7 +666,7 @@ ACTOR Future<Void> processTransactionStateRequestPart(Reference<Resolver> self,
 	ASSERT(pContext->pResolverData.getPtr() != nullptr);
 	ASSERT(pContext->pActors != nullptr);
 
-	if (pContext->receivedSequences.count(request.sequence)) {
+	if (pContext->receivedSequences.contains(request.sequence)) {
 		// This part is already received. Still we will re-broadcast it to other CommitProxies & Resolvers
 		pContext->pActors->send(broadcastTxnRequest(request, SERVER_KNOBS->TXN_STATE_SEND_AMOUNT, true));
 		wait(yield());
@@ -795,7 +795,7 @@ ACTOR Future<Void> checkRemoved(Reference<AsyncVar<ServerDBInfo> const> db,
                                 ResolverInterface myInterface) {
 	loop {
 		if (db->get().recoveryCount >= recoveryCount &&
-		    !std::count(db->get().resolvers.begin(), db->get().resolvers.end(), myInterface))
+		    std::find(db->get().resolvers.begin(), db->get().resolvers.end(), myInterface) == db->get().resolvers.end())
 			throw worker_removed();
 		wait(db->onChange());
 	}
